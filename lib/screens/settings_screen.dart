@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:url_launcher/url_launcher.dart';
+import '../db/database_provider.dart';
+import '../services/sync_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -50,23 +51,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       await FirebaseAuth.instance.sendPasswordResetEmail(
                         email: user!.email!,
                       );
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Password reset email sent!'),
-                            backgroundColor: Colors.green,
-                          ),
-                        );
-                      }
+                      if (!mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Password reset email sent!'),
+                          backgroundColor: Colors.green,
+                        ),
+                      );
                     } catch (e) {
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text('Error: ${e.toString()}'),
-                            backgroundColor: Colors.red,
-                          ),
-                        );
-                      }
+                      if (!mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Error: ${e.toString()}'),
+                          backgroundColor: Colors.red,
+                        ),
+                      );
                     }
                   }
                 },
@@ -146,6 +145,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('Problem reporting coming soon')),
                   );
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.sync_outlined),
+                title: const Text('Sync Now'),
+                subtitle: const Text('Push pending changes and pull latest data from server'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () async {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Starting sync...')));
+                  try {
+                    final user = FirebaseAuth.instance.currentUser;
+                    if (user == null) throw Exception('Not signed in');
+                    final overrideUrl = String.fromEnvironment('BACKEND_URL');
+                    final baseUrl = overrideUrl.isNotEmpty ? overrideUrl : 'https://att-back-0xvj.onrender.com';
+                    final db = DatabaseProvider.of(context);
+                    final sync = SyncService(database: db, baseUrl: baseUrl);
+                    await sync.syncPendingChanges();
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Sync completed')));
+                  } catch (e) {
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Sync failed: ${e.toString()}')));
+                  }
                 },
               ),
               ListTile(

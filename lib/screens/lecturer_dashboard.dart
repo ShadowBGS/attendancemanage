@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
+import 'package:drift/drift.dart' show Value;
 import '../main.dart' show database, AuthGate;
 import '../db/database_provider.dart';
 import '../db/database.dart';
@@ -119,6 +120,22 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
     }
   }
 
+  Future<void> _handleRefresh() async {
+    try {
+      // Sync with backend first
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        await _syncService.syncPendingChanges();
+      }
+    } catch (e) {
+      // Silent fail - continue with refresh even if sync fails
+    }
+    
+    // Then refresh data from backend and reload local
+    await _refreshCoursesFromBackend();
+    await _loadCourses();
+  }
+
   String _getGreeting() {
     final hour = DateTime.now().hour;
     if (hour < 12) return 'Good Morning';
@@ -131,37 +148,66 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) return;
 
-      final idToken = await user.getIdToken();
-      if (idToken == null) return;
-
-      const overrideUrl = String.fromEnvironment('BACKEND_URL');
-      final baseUrl = overrideUrl.isNotEmpty ? overrideUrl : 'https://att-back-0xvj.onrender.com';
-
-      final response = await http.get(
-        Uri.parse(baseUrl).resolve('/profile/info'),
-        headers: {'Authorization': 'Bearer $idToken'},
-      );
-
-      if (response.statusCode == 200 && mounted) {
-        final data = jsonDecode(response.body);
+      // Read cached profile from local DB first for instant offline support
+      final db = DatabaseProvider.of(context);
+      final cached = await db.getUserByFirebaseUid(user.uid);
+      if (cached != null && mounted) {
         setState(() {
-          // Try backend name first, fall back to Firebase displayName, then email username
-          final backendName = (data['name'] as String?)?.trim() ?? '';
-          final displayName = (user.displayName ?? '').trim();
-          final emailName = (data['email'] as String?)?.split('@').first ?? '';
-          
-          _userName = backendName.isNotEmpty 
-              ? backendName 
-              : (displayName.isNotEmpty ? displayName : emailName);
-          _userEmail = data['email'] ?? user.email ?? 'user@example.com';
-
-          final roleInfo = data['role_info'];
-          final lecturerId = roleInfo is Map ? roleInfo['lecturer_id'] : null;
-          _lecturerId = lecturerId is int ? lecturerId : null;
+          _userName = cached.name;
+          _userEmail = cached.email;
         });
       }
+
+      // Try to refresh from backend (will fail gracefully if offline)
+      try {
+        final idToken = await user.getIdToken();
+        if (idToken == null) return;
+
+        const overrideUrl = String.fromEnvironment('BACKEND_URL');
+        final baseUrl = overrideUrl.isNotEmpty ? overrideUrl : 'https://att-back-0xvj.onrender.com';
+
+        final response = await http.get(
+          Uri.parse(baseUrl).resolve('/profile/info'),
+          headers: {'Authorization': 'Bearer $idToken'},
+        ).timeout(const Duration(seconds: 10));
+
+        if (response.statusCode == 200 && mounted) {
+          final data = jsonDecode(response.body);
+          setState(() {
+            // Try backend name first, fall back to Firebase displayName, then email username
+            final backendName = (data['name'] as String?)?.trim() ?? '';
+            final displayName = (user.displayName ?? '').trim();
+            final emailName = (data['email'] as String?)?.split('@').first ?? '';
+            
+            _userName = backendName.isNotEmpty 
+                ? backendName 
+                : (displayName.isNotEmpty ? displayName : emailName);
+            _userEmail = data['email'] ?? user.email ?? 'user@example.com';
+
+            final roleInfo = data['role_info'];
+            final lecturerId = roleInfo is Map ? roleInfo['lecturer_id'] : null;
+            _lecturerId = lecturerId is int ? lecturerId : null;
+          });
+
+          // Save updated profile to local DB
+          await db.upsertUser(
+            UsersCompanion.insert(
+              firebaseUid: user.uid,
+              email: data['email'] ?? user.email ?? '',
+              name: data['name'] ?? user.displayName ?? '',
+              role: 'lecturer',
+              externalId: Value(data['external_id'] as String?),
+              department: Value(data['department'] as String?),
+              profileCompleted: Value(data['profile_completed'] as bool? ?? false),
+              lastSyncedAt: Value(DateTime.now()),
+            ),
+          );
+        }
+      } catch (e) {
+        // Network error - continue with cached data
+      }
     } catch (e) {
-      // Fall back to Firebase user info
+      // Fall back to Firebase user info if no cache available
       final user = FirebaseAuth.instance.currentUser;
       if (mounted && user != null) {
         setState(() {
@@ -229,14 +275,19 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
           const SizedBox(width: 16),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 24.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(height: 20),
-            // Hero card for starting new session
-            GestureDetector(
+      body: RefreshIndicator(
+        onRefresh: _handleRefresh,
+        child: CustomScrollView(
+          slivers: [
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 20),
+                    // Hero card for starting new session
+                    GestureDetector(
               onTap: _handleStartSession,
               child: Container(
                 width: double.infinity,
@@ -295,23 +346,31 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
               ),
             ),
             const SizedBox(height: 16),
-            Expanded(
-              child: _courses.isEmpty
-                  ? const Center(child: Text('No courses yet'))
-                  : ListView.builder(
-                      itemCount: _courses.length,
-                      itemBuilder: (context, index) {
-                        final course = _courses[index];
-                        return _CourseCard(
-                          code: course.code,
-                          name: course.name,
-                          students: '0', // TODO: calculate from enrollments
-                          accentColor: _accentColor,
-                          onStart: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => CourseDetailScreen(
+                  ],
+                ),
+              ),
+            ),
+            _courses.isEmpty
+                ? const SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: Center(child: Text('No courses yet')),
+                  )
+                : SliverPadding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                    sliver: SliverList(
+                      delegate: SliverChildBuilderDelegate(
+                        (context, index) {
+                          final course = _courses[index];
+                          return _CourseCard(
+                            code: course.code,
+                            name: course.name,
+                            students: '0', // TODO: calculate from enrollments
+                            accentColor: _accentColor,
+                            onStart: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => CourseDetailScreen(
                                   courseCode: course.code,
                                   courseName: course.name,
                                   courseLocalId: course.id,
@@ -321,9 +380,11 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
                             );
                           },
                         );
-                      },
+                        },
+                        childCount: _courses.length,
+                      ),
                     ),
-            ),
+                  ),
           ],
         ),
       ),
@@ -567,11 +628,8 @@ class _ProfileSheet extends StatelessWidget {
                 await GoogleSignIn.instance.disconnect();
               } catch (_) {}
               
-              // Navigate to auth screen
-              navigator.pushAndRemoveUntil(
-                MaterialPageRoute(builder: (_) => const AuthGate()),
-                (route) => false,
-              );
+              // Let the auth state listener handle navigation; return to root route.
+              navigator.popUntil((route) => route.isFirst);
             },
           ),
         ],

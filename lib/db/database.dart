@@ -206,8 +206,21 @@ class AppDatabase extends _$AppDatabase {
 
   Future<int> insertSession(SessionsCompanion session) async {
     final id = await into(sessions).insert(session);
-    // Add to sync queue with basic payload
-    await _queueSync('session', id, 'create', {'id': id});
+    
+    // Fetch the inserted session to build complete payload
+    final insertedSession = await (select(sessions)..where((s) => s.id.equals(id))).getSingle();
+    final course = await (select(courses)..where((c) => c.id.equals(insertedSession.courseId))).getSingleOrNull();
+    
+    // Add to sync queue with complete payload
+    await _queueSync('session', id, 'create', {
+      'session_id': insertedSession.serverId,
+      'course_id': course?.serverId,
+      'session_type': insertedSession.sessionType,
+      'start_time': insertedSession.startTime.toIso8601String(),
+      'end_time': insertedSession.endTime?.toIso8601String(),
+      'location': insertedSession.location,
+      'status': insertedSession.status,
+    });
     return id;
   }
 
@@ -280,6 +293,52 @@ class AppDatabase extends _$AppDatabase {
     return result;
   }
 
+  // ========== STUDENT-FACING QUERIES ==========
+
+  /// Get a list of courses a student is enrolled in.
+  Future<List<Course>> getCoursesForStudent(int studentLocalId) async {
+    final query = select(courses).join([
+      innerJoin(
+        enrollments,
+        enrollments.courseId.equalsExp(courses.id) & enrollments.studentId.equals(studentLocalId),
+      ),
+    ]);
+
+    final rows = await query.get();
+    final seen = <int>{};
+    final result = <Course>[];
+    for (final row in rows) {
+      final c = row.readTable(courses);
+      if (seen.add(c.id)) result.add(c);
+    }
+    result.sort((a, b) => a.name.compareTo(b.name));
+    return result;
+  }
+
+  /// Count how many enrollments a student has.
+  Future<int> countEnrollmentsForStudent(int studentLocalId) async {
+    return (select(enrollments)..where((e) => e.studentId.equals(studentLocalId))).get().then((v) => v.length);
+  }
+
+  /// Get sessions for courses the student is enrolled in.
+  Future<List<Session>> getSessionsForStudent(int studentLocalId) async {
+    final query = select(sessions).join([
+      innerJoin(
+        enrollments,
+        enrollments.courseId.equalsExp(sessions.courseId) & enrollments.studentId.equals(studentLocalId),
+      ),
+    ]);
+
+    final rows = await query.get();
+    final seen = <int>{};
+    final result = <Session>[];
+    for (final row in rows) {
+      final s = row.readTable(sessions);
+      if (seen.add(s.id)) result.add(s);
+    }
+    result.sort((a, b) => a.startTime.compareTo(b.startTime));
+    return result;
+  }
   // ========== ATTENDANCE OPERATIONS ==========
 
   Future<List<AttendanceRecord>> getAttendanceBySession(int sessionId) {
@@ -290,8 +349,22 @@ class AppDatabase extends _$AppDatabase {
 
   Future<int> markAttendance(AttendanceRecordsCompanion record) async {
     final id = await into(attendanceRecords).insert(record);
-    // Add to sync queue with basic payload
-    await _queueSync('attendance', id, 'create', {'id': id});
+    
+    // Fetch the inserted attendance record to build complete payload
+    final insertedRecord = await (select(attendanceRecords)..where((a) => a.id.equals(id))).getSingle();
+    final session = await (select(sessions)..where((s) => s.id.equals(insertedRecord.sessionId))).getSingleOrNull();
+    final student = await (select(users)..where((u) => u.id.equals(insertedRecord.studentId))).getSingleOrNull();
+    
+    // Add to sync queue with complete payload
+    await _queueSync('attendance', id, 'create', {
+      'attendance_id': insertedRecord.serverId,
+      'session_id': session?.serverId,
+      'student_firebase_uid': student?.firebaseUid,
+      'status': insertedRecord.status,
+      'timestamp': insertedRecord.markedAt.toIso8601String(),
+      'face_verified': insertedRecord.faceVerified,
+      'verification_method': insertedRecord.verificationMethod,
+    });
     return id;
   }
 

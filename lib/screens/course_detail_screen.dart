@@ -7,7 +7,7 @@ import '../db/database_provider.dart';
 
 import 'course_students_screen.dart';
 import 'course_sessions_screen.dart';
-import 'session_attendance_screen.dart';
+import 'wifi_direct_host_screen.dart';
 
 class CourseDetailScreen extends StatefulWidget {
   final String courseCode;
@@ -90,90 +90,14 @@ class _CourseDetailScreenState extends State<CourseDetailScreen> {
 
   Future<void> _startClass() async {
     setState(() => _isLoading = true);
-
     try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) {
-        _showError('Not signed in.');
-        return;
-      }
-
-      final idToken = await user.getIdToken();
-      if (idToken == null) {
-        _showError('Could not get authentication token.');
-        return;
-      }
-
-      final serverCourseId = widget.courseServerId;
-      if (serverCourseId == null || serverCourseId.isEmpty) {
-        _showError('Course is not synced to server yet.');
-        return;
-      }
-
-      final response = await http
-          .post(
-            Uri.parse(_backendBaseUrl()).resolve('/sessions/create'),
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $idToken',
-            },
-            body: jsonEncode({
-              'course_id': int.parse(serverCourseId),
-            }),
-          )
-          .timeout(const Duration(seconds: 20));
-
-      if (response.statusCode != 200) {
-        String msg = 'Failed to start class.';
-        try {
-          final decoded = jsonDecode(response.body);
-          if (decoded is Map && decoded['detail'] != null) msg = decoded['detail'].toString();
-        } catch (_) {}
-        _showError(msg);
-        return;
-      }
-
-      final decoded = jsonDecode(response.body);
-      if (decoded is! Map) {
-        _showError('Invalid server response.');
-        return;
-      }
-
-      final serverSessionId = decoded['session_id']?.toString();
-      final startIso = decoded['start_time']?.toString();
-      final endIso = decoded['end_time']?.toString();
-      if (serverSessionId == null || startIso == null) {
-        _showError('Invalid session response.');
-        return;
-      }
-
-      final startTime = DateTime.tryParse(startIso)?.toLocal() ?? DateTime.now();
-      final endTime = endIso != null ? DateTime.tryParse(endIso)?.toLocal() : null;
-      final now = DateTime.now();
-      final status = (endTime != null && now.isAfter(endTime))
-          ? 'completed'
-          : ((endTime != null && now.isBefore(endTime)) ? 'active' : 'active');
-
-      final db = DatabaseProvider.of(context);
-      final localSessionId = await db.upsertSessionFromServer(
-        serverId: serverSessionId,
-        courseLocalId: widget.courseLocalId,
-        startTime: startTime,
-        endTime: endTime,
-        status: status,
-      );
-
-      _showSuccess('Class started successfully!');
-
-      if (!mounted) return;
-      Navigator.push(
+      await Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (_) => SessionAttendanceScreen(
+          builder: (_) => WifiDirectHostScreen(
             courseCode: widget.courseCode,
             courseName: widget.courseName,
-            sessionLocalId: localSessionId,
-            sessionServerId: serverSessionId,
+            courseLocalId: widget.courseLocalId,
           ),
         ),
       );

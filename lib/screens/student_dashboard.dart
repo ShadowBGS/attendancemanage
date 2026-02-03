@@ -5,9 +5,12 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
-import '../main.dart' show AuthGate;
-import 'notifications_screen.dart';
+import 'wifi_direct_scan_screen.dart';
 import 'settings_screen.dart';
+import '../db/database_provider.dart';
+import '../db/database.dart';
+import '../services/sync_service.dart';
+import 'package:drift/drift.dart' show Value;
 
 class StudentDashboard extends StatefulWidget {
   const StudentDashboard({super.key});
@@ -21,16 +24,33 @@ class _StudentDashboardState extends State<StudentDashboard> {
   String _userName = '';
   String _userEmail = 'user@example.com';
 
+  // Dashboard data
+  int _totalSessions = 0;
+  int _enrolledClasses = 0;
+  List<Course> _myClasses = [];
+
   @override
   void initState() {
     super.initState();
     _loadUserInfo();
+    // Load dashboard counts from local DB
+    Future.microtask(() => _loadDashboardData());
   }
 
   Future<void> _loadUserInfo() async {
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) return;
+
+      // Read cached profile from local DB first for instant UI
+      final db = DatabaseProvider.of(context);
+      final cached = await db.getUserByFirebaseUid(user.uid);
+      if (cached != null && mounted) {
+        setState(() {
+          _userName = cached.name;
+          _userEmail = cached.email;
+        });
+      }
 
       final idToken = await user.getIdToken();
       if (idToken == null) return;
@@ -41,103 +61,166 @@ class _StudentDashboardState extends State<StudentDashboard> {
       final response = await http.get(
         Uri.parse(baseUrl).resolve('/profile/info'),
         headers: {'Authorization': 'Bearer $idToken'},
-      );
+      ).timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200 && mounted) {
         final data = jsonDecode(response.body);
         setState(() {
-          _userName = data['name'];
-          _userEmail = data['email'] ?? 'user@example.com';
+          _userName = data['name'] ?? user.displayName ?? '';
+          _userEmail = data['email'] ?? user.email ?? 'user@example.com';
         });
+
+        // Persist fresh profile to local DB for future launches
+        try {
+          await db.upsertUser(
+            UsersCompanion.insert(
+              firebaseUid: user.uid,
+              email: data['email'] ?? user.email ?? '',
+              name: data['name'] ?? user.displayName ?? '',
+              role: 'student',
+              externalId: Value(data['external_id'] as String?),
+              department: Value(data['department'] as String?),
+              profileCompleted: Value(data['profile_completed'] as bool? ?? false),
+              lastSyncedAt: Value(DateTime.now()),
+            ),
+          );
+        } catch (_) {
+          // Ignore DB persistence errors; UI already updated.
+        }
+
+        // Refresh dashboard now that we have latest profile and local DB
+        Future.microtask(() => _loadDashboardData());
       }
     } catch (e) {
-      // Silently fail with default values already set
+      // Fall back to Firebase user info if backend call fails
+      final user = FirebaseAuth.instance.currentUser;
+      if (mounted && user != null) {
+        setState(() {
+          _userName = user.displayName ?? user.email?.split('@').first ?? '';
+          _userEmail = user.email ?? 'user@example.com';
+        });
+      }
     }
+  }
+
+  Future<void> _handleRefresh() async {
+    try {
+      // Sync with backend first
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        const overrideUrl = String.fromEnvironment('BACKEND_URL');
+        final baseUrl = overrideUrl.isNotEmpty ? overrideUrl : 'https://att-back-0xvj.onrender.com';
+        final db = DatabaseProvider.of(context);
+        final sync = SyncService(database: db, baseUrl: baseUrl);
+        await sync.syncPendingChanges();
+      }
+    } catch (e) {
+      // Silent fail - continue with refresh even if sync fails
+    }
+    
+    // Then refresh local data
+    await _loadUserInfo();
+    await _loadDashboardData();
   }
 
   @override
   Widget build(BuildContext context) {
-    final classes = <_ClassCardData>[
-      const _ClassCardData(code: 'CS101', name: 'Intro to Computing'),
-      const _ClassCardData(code: 'MTH202', name: 'Calculus II'),
-      const _ClassCardData(code: 'PHY101', name: 'Physics I'),
-    ];
-
     return Scaffold(
       backgroundColor: Colors.grey[50],
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Welcome, $_userName!',
-                          style: const TextStyle(
-                            fontSize: 22,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.black87,
+        child: RefreshIndicator(
+          onRefresh: _handleRefresh,
+          child: CustomScrollView(
+            slivers: [
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Welcome, $_userName!',
+                                  style: const TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.w700,
+                                    color: Colors.black87,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                const Text(
+                                  'Student Dashboard',
+                                  style: TextStyle(fontSize: 13, color: Colors.grey),
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 2),
-                        const Text(
-                          'Student Dashboard',
-                          style: TextStyle(fontSize: 13, color: Colors.grey),
-                        ),
-                      ],
-                    ),
+                          _ProfileAvatar(
+                            accentColor: _accentColor,
+                            onTap: () => _showProfileSheet(context),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+                      Row(
+                        children: [
+                          _StatCard(
+                            value: _totalSessions.toString(),
+                            label: 'Total Sessions',
+                            color: _accentColor,
+                          ),
+                          const SizedBox(width: 12),
+                          _StatCard(
+                            value: _enrolledClasses.toString(),
+                            label: 'Enrolled Classes',
+                            color: Colors.teal,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 32),
+                      const Text(
+                        'My Classes',
+                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
                   ),
-                  _ProfileAvatar(
-                    accentColor: _accentColor,
-                    onTap: () => _showProfileSheet(context),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-              Row(
-                children: const [
-                  _StatCard(
-                    value: '12',
-                    label: 'Total Sessions',
-                    color: _accentColor,
-                  ),
-                  SizedBox(width: 12),
-                  _StatCard(
-                    value: '3',
-                    label: 'Enrolled Classes',
-                    color: Colors.teal,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 32),
-              const Text(
-                'My Classes',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 16),
-              Expanded(
-                child: ListView.builder(
-                  itemCount: classes.length,
-                  itemBuilder: (context, index) {
-                    final item = classes[index];
-                    return _ClassCard(data: item, accentColor: _accentColor);
-                  },
                 ),
               ),
-              const SizedBox(height: 80),
+              _myClasses.isEmpty
+                  ? const SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: Center(child: Text('No enrolled classes')),
+                    )
+                  : SliverPadding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      sliver: SliverList(
+                        delegate: SliverChildBuilderDelegate(
+                          (context, index) {
+                            final c = _myClasses[index];
+                            final item = _ClassCardData(code: c.code, name: c.name);
+                            return _ClassCard(data: item, accentColor: _accentColor);
+                          },
+                          childCount: _myClasses.length,
+                        ),
+                      ),
+                    ),
+              const SliverToBoxAdapter(child: SizedBox(height: 80)),
             ],
           ),
         ),
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () {
-          // TODO: Navigate to QR scanner.
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const WifiDirectScanScreen()),
+          );
         },
         label: const Text(
           'Scan QR',
@@ -160,6 +243,30 @@ class _StudentDashboardState extends State<StudentDashboard> {
         return _ProfileSheet(name: _userName, email: _userEmail);
       },
     );
+  }
+
+  Future<void> _loadDashboardData() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+      final db = DatabaseProvider.of(context);
+      final cached = await db.getUserByFirebaseUid(user.uid);
+      if (cached == null) return;
+
+      final localId = cached.id;
+      final classes = await db.getCoursesForStudent(localId);
+      final enrollCount = await db.countEnrollmentsForStudent(localId);
+      final sessions = await db.getSessionsForStudent(localId);
+
+      if (!mounted) return;
+      setState(() {
+        _myClasses = classes;
+        _enrolledClasses = enrollCount;
+        _totalSessions = sessions.length;
+      });
+    } catch (_) {
+      // ignore errors for now
+    }
   }
 }
 
@@ -268,11 +375,8 @@ class _ProfileSheet extends StatelessWidget {
                 await GoogleSignIn.instance.disconnect();
               } catch (_) {}
               
-              // Navigate to auth screen
-              navigator.pushAndRemoveUntil(
-                MaterialPageRoute(builder: (_) => const AuthGate()),
-                (route) => false,
-              );
+              // Let the auth state listener handle navigation; return to root route.
+              navigator.popUntil((route) => route.isFirst);
             },
           ),
         ],

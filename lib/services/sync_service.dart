@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:drift/drift.dart' show Value;
 import '../db/database.dart';
 
 /// Handles background sync of offline changes to server
@@ -69,6 +70,13 @@ class SyncService {
           // Increment retry count and log error
           await database.incrementSyncRetry(item.id, e.toString());
         }
+      }
+
+      // After pushing local changes, pull server deltas to keep local DB in sync
+      try {
+        await pullLatestData(idToken);
+      } catch (e) {
+        // Ignore pull errors; will retry later
       }
     } finally {
       _isSyncing = false;
@@ -185,8 +193,151 @@ class SyncService {
       );
 
       if (response.statusCode == 200) {
-        // TODO: Process changes from server and update local DB
-        // This is where we'd merge server changes with local data
+        // Process server changes and upsert into local DB
+        final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+        final changes = decoded['changes'] as Map<String, dynamic>?;
+        if (changes == null) return;
+
+        // Courses
+        if (changes['courses'] is List) {
+          for (final raw in changes['courses'] as List) {
+            try {
+              final map = raw as Map<String, dynamic>;
+              final serverId = map['course_id']?.toString() ?? '';
+              final code = map['course_code']?.toString() ?? '';
+              final name = map['course_name']?.toString() ?? '';
+              final description = map['description']?.toString();
+              if (serverId.isEmpty) continue;
+              await database.upsertCourseFromServer(
+                serverId: serverId,
+                code: code,
+                name: name,
+                description: description,
+                lecturerId: map['lecturer_id'] is int ? map['lecturer_id'] as int : null,
+              );
+            } catch (_) {}
+          }
+        }
+
+        // Sessions
+        if (changes['sessions'] is List) {
+          for (final raw in changes['sessions'] as List) {
+            try {
+              final map = raw as Map<String, dynamic>;
+              final serverId = map['session_id']?.toString() ?? '';
+              final courseServerId = map['course_id']?.toString() ?? '';
+              if (serverId.isEmpty || courseServerId.isEmpty) continue;
+
+              final course = await database.getCourseByServerId(courseServerId);
+              if (course == null) continue;
+
+              final startTime = DateTime.tryParse(map['start_time']?.toString() ?? '') ?? DateTime.now();
+              final endTime = map['end_time'] != null ? DateTime.tryParse(map['end_time'].toString() ?? '') : null;
+              final status = map['status']?.toString() ?? 'active';
+
+              await database.upsertSessionFromServer(
+                serverId: serverId,
+                courseLocalId: course.id,
+                startTime: startTime,
+                endTime: endTime,
+                status: status,
+              );
+            } catch (_) {}
+          }
+        }
+
+        // Users/Students
+        if (changes['users'] is List) {
+          for (final raw in changes['users'] as List) {
+            try {
+              final map = raw as Map<String, dynamic>;
+              final firebaseUid = map['firebase_uid']?.toString();
+              if (firebaseUid == null || firebaseUid.isEmpty) continue;
+              await database.upsertUser(
+                UsersCompanion.insert(
+                  firebaseUid: firebaseUid,
+                  email: map['email']?.toString() ?? '',
+                  name: map['name']?.toString() ?? firebaseUid,
+                  role: map['role']?.toString() ?? 'student',
+                  externalId: Value(map['external_id']?.toString()),
+                  department: Value(map['department']?.toString()),
+                  profileCompleted: Value(map['profile_completed'] as bool? ?? false),
+                  lastSyncedAt: Value(DateTime.now()),
+                ),
+              );
+            } catch (_) {}
+          }
+        }
+
+        // Enrollments
+        if (changes['enrollments'] is List) {
+          for (final raw in changes['enrollments'] as List) {
+            try {
+              final map = raw as Map<String, dynamic>;
+              final studentId = (map['student_id'] as int?);
+              final courseId = (map['course_id'] as int?);
+              if (studentId == null || courseId == null) continue;
+
+              // Backend provides numeric IDs - try to resolve to local entries
+              // Note: This assumes backend may also send firebase_uid or course server id in payload in the future.
+              // Currently, if we can't resolve, skip.
+            } catch (_) {}
+          }
+        }
+
+        // Attendance
+        if (changes['attendance'] is List) {
+          for (final raw in changes['attendance'] as List) {
+            try {
+              final map = raw as Map<String, dynamic>;
+              final attendanceId = map['attendance_id']?.toString() ?? '';
+              final sessionId = map['session_id']?.toString() ?? '';
+              final student = map['student'] as Map<String, dynamic>?;
+              if (attendanceId.isEmpty || sessionId.isEmpty || student == null) continue;
+
+              final session = await database.getSessionByServerId(sessionId);
+              if (session == null) continue;
+
+              // Ensure student exists in local DB
+              final firebaseUid = student['firebase_uid']?.toString();
+              int? studentLocalId;
+              if (firebaseUid != null && firebaseUid.isNotEmpty) {
+                final existing = await database.getUserByFirebaseUid(firebaseUid);
+                if (existing != null) {
+                  studentLocalId = existing.id;
+                } else {
+                  studentLocalId = await database.upsertUser(
+                    UsersCompanion.insert(
+                      firebaseUid: firebaseUid,
+                      email: student['email']?.toString() ?? '',
+                      name: student['name']?.toString() ?? firebaseUid,
+                      role: 'student',
+                      externalId: const Value(null),
+                      department: const Value(null),
+                      profileCompleted: const Value(false),
+                      lastSyncedAt: Value(DateTime.now()),
+                    ),
+                  );
+                }
+              }
+
+              if (studentLocalId == null) continue;
+
+              final markedAt = DateTime.tryParse(map['timestamp']?.toString() ?? '') ?? DateTime.now();
+              final status = map['status']?.toString() ?? 'present';
+              final verified = map['verified'] as bool? ?? false;
+
+              await database.upsertAttendanceFromServer(
+                serverId: attendanceId,
+                sessionLocalId: session.id,
+                studentLocalId: studentLocalId,
+                status: status,
+                markedAt: markedAt,
+                faceVerified: verified,
+              );
+            } catch (_) {}
+          }
+        }
       }
     } catch (e) {
       // Silently fail - next sync will retry
