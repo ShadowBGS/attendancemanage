@@ -6,15 +6,19 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:drift/drift.dart' show Value;
-import '../main.dart' show database, AuthGate;
+import '../main.dart' show database;
 import '../db/database_provider.dart';
 import '../db/database.dart';
 import '../services/sync_service.dart';
+import '../theme/app_colors.dart';
 
 import 'create_course_screen.dart';
 import 'course_detail_screen.dart';
-import 'notifications_screen.dart';
+import 'class_startup_screen.dart';
 import 'settings_screen.dart';
+import 'lecturer_courses_screen.dart';
+import 'lecturer_profile_screen.dart';
+import 'database_viewer_screen.dart';
 
 class LecturerDashboard extends StatefulWidget {
   const LecturerDashboard({super.key});
@@ -24,7 +28,7 @@ class LecturerDashboard extends StatefulWidget {
 }
 
 class _LecturerDashboardState extends State<LecturerDashboard> {
-  static const Color _accentColor = Colors.blue;
+  static const Color _accentColor = AppColors.primaryBlue;
   String _userName = '';
   String _userEmail = '';
   int? _lecturerId;
@@ -122,7 +126,7 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
 
   Future<void> _handleRefresh() async {
     try {
-      // Sync with backend first
+      // Sync pending local changes to backend first
       final user = FirebaseAuth.instance.currentUser;
       if (user != null) {
         await _syncService.syncPendingChanges();
@@ -133,7 +137,123 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
     
     // Then refresh data from backend and reload local
     await _refreshCoursesFromBackend();
+    await _refreshSessionsFromBackend();
     await _loadCourses();
+  }
+
+  Future<void> _refreshSessionsFromBackend() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+      final idToken = await user.getIdToken();
+      if (idToken == null) return;
+
+      final response = await http.get(
+        Uri.parse(_backendBaseUrl()).resolve('/sessions/my-sessions'),
+        headers: {'Authorization': 'Bearer $idToken'},
+      ).timeout(const Duration(seconds: 20));
+
+      if (response.statusCode != 200) return;
+
+      final decoded = jsonDecode(response.body);
+      final sessions = (decoded is Map && decoded['sessions'] is List)
+          ? (decoded['sessions'] as List)
+          : const [];
+
+      final db = DatabaseProvider.of(context);
+      for (final item in sessions) {
+        if (item is! Map) continue;
+        final serverId = item['session_id']?.toString();
+        final courseCode = item['course_code']?.toString();
+        if (serverId == null || courseCode == null) continue;
+
+        // Find course by code
+        final course = await db.getCourseByCode(courseCode);
+        if (course == null) continue;
+
+        final startTime = DateTime.tryParse(item['start_time']?.toString() ?? '') ?? DateTime.now();
+        final endTime = item['end_time'] != null ? DateTime.tryParse(item['end_time'].toString()) : null;
+        final status = item['status']?.toString() ?? 'active';
+
+        await db.upsertSessionFromServer(
+          serverId: serverId,
+          courseLocalId: course.id,
+          startTime: startTime,
+          endTime: endTime,
+          status: status,
+        );
+
+        // Also fetch attendance records for this session
+        await _refreshAttendanceForSession(serverId, idToken);
+      }
+    } catch (e) {
+      print('Failed to refresh sessions: $e');
+    }
+  }
+
+  Future<void> _refreshAttendanceForSession(String sessionServerId, String idToken) async {
+    try {
+      final response = await http.get(
+        Uri.parse(_backendBaseUrl()).resolve('/attendance/session/$sessionServerId'),
+        headers: {'Authorization': 'Bearer $idToken'},
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode != 200) return;
+
+      final decoded = jsonDecode(response.body);
+      final records = (decoded is Map && decoded['attendance'] is List)
+          ? (decoded['attendance'] as List)
+          : const [];
+
+      final db = DatabaseProvider.of(context);
+      final session = await db.getSessionByServerId(sessionServerId);
+      if (session == null) return;
+
+      for (final item in records) {
+        if (item is! Map) continue;
+        final studentFirebaseUid = item['student_firebase_uid']?.toString();
+        if (studentFirebaseUid == null) continue;
+
+        // Get or create student user
+        var student = await db.getUserByFirebaseUid(studentFirebaseUid);
+        if (student == null) {
+          // Create placeholder student user
+          final studentId = await db.upsertUser(
+            UsersCompanion.insert(
+              firebaseUid: studentFirebaseUid,
+              email: '',
+              name: item['student_name']?.toString() ?? 'Student',
+              role: 'student',
+              externalId: Value(item['matric_number']?.toString()),
+              department: const Value(null),
+              profileCompleted: const Value(false),
+              lastSyncedAt: Value(DateTime.now()),
+            ),
+          );
+          student = await db.getUserById(studentId);
+        }
+
+        if (student == null) continue;
+
+        final markedAt = DateTime.tryParse(item['marked_at']?.toString() ?? '') ?? DateTime.now();
+        final status = item['status']?.toString() ?? 'present';
+
+        await db.markAttendance(
+          AttendanceRecordsCompanion.insert(
+            serverId: Value(item['attendance_id']?.toString()),
+            sessionId: session.id,
+            studentId: student.id,
+            status: status,
+            markedAt: Value(markedAt),
+            faceVerified: Value(item['face_verified'] == true),
+            verificationMethod: Value(item['verification_method']?.toString() ?? 'qr'),
+            synced: const Value(true),
+          ),
+        );
+      }
+    } catch (e) {
+      print('Failed to refresh attendance for session $sessionServerId: $e');
+    }
   }
 
   String _getGreeting() {
@@ -220,140 +340,203 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
 
   @override
   Widget build(BuildContext context) {
-    final greeting = _getGreeting();
-
     return Scaffold(
-      backgroundColor: Colors.white,
-      appBar: AppBar(
-        automaticallyImplyLeading: false,
-        backgroundColor: Colors.white,
-        elevation: 0,
-        titleSpacing: 24,
-        title: Row(
-          children: [
-            CircleAvatar(
-              backgroundColor: _accentColor.withOpacity(0.1),
-              child: Icon(Icons.person, color: _accentColor),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '$greeting, ${_userName.isNotEmpty ? _userName : "Lecturer"}',
-                    style: const TextStyle(
-                      color: Colors.black,
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const Text(
-                    "Lecturer Dashboard",
-                    style: TextStyle(color: Colors.grey, fontSize: 12),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.notifications_outlined, color: Colors.black),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const NotificationsScreen()),
-              );
-            },
-          ),
-          _ProfileAvatar(
-            accentColor: _accentColor,
-            onTap: () => _showProfileSheet(context),
-          ),
-          const SizedBox(width: 16),
-        ],
-      ),
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: RefreshIndicator(
         onRefresh: _handleRefresh,
         child: CustomScrollView(
           slivers: [
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24.0),
-                child: Column(
+            // Modern Blue Header
+            SliverAppBar(
+              expandedHeight: 150,
+              floating: false,
+              pinned: true,
+              backgroundColor: AppColors.primaryBlue,
+              elevation: 0,
+              automaticallyImplyLeading: false,
+              flexibleSpace: FlexibleSpaceBar(
+                titlePadding: const EdgeInsets.only(left: 24, bottom: 16),
+                title: Column(
+                  mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const SizedBox(height: 20),
-                    // Hero card for starting new session
-                    GestureDetector(
-              onTap: _handleStartSession,
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(24),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [_accentColor, _accentColor.withOpacity(0.7)],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  borderRadius: BorderRadius.circular(20),
-                  boxShadow: [
-                    BoxShadow(
-                      color: _accentColor.withOpacity(0.3),
-                      blurRadius: 10,
-                      offset: const Offset(0, 5),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: const Icon(Icons.wifi_tethering, color: Colors.white, size: 32),
-                    ),
-                    const SizedBox(height: 16),
                     const Text(
-                      "Start New Session",
+                      'LECTURER PORTAL',
                       style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Hello, ${_userName.isNotEmpty ? _userName.split(' ').first : "Dr. Smith"}!',
+                      style: const TextStyle(
                         color: Colors.white,
-                        fontSize: 22,
+                        fontSize: 18,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      "Take attendance for any of your active courses.",
-                      style: TextStyle(color: Colors.white70, fontSize: 14),
-                    ),
                   ],
                 ),
+                background: Container(
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        AppColors.primaryBlue,
+                        AppColors.secondaryBlue,
+                      ],
+                    ),
+                  ),
+                ),
               ),
+              actions: [
+                // Database Viewer - Commented out for now (may be needed later)
+                // IconButton(
+                //   icon: const Icon(Icons.storage, color: Colors.white),
+                //   tooltip: 'View Database',
+                //   onPressed: () {
+                //     Navigator.push(
+                //       context,
+                //       MaterialPageRoute(
+                //         builder: (_) => const DatabaseViewerScreen(),
+                //       ),
+                //     );
+                //   },
+                // ),
+                GestureDetector(
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const LecturerProfileScreen(),
+                      ),
+                    );
+                  },
+                  child: CircleAvatar(
+                    radius: 20,
+                    backgroundColor: AppColors.white,
+                    child: Icon(
+                      Icons.person,
+                      color: AppColors.primaryBlue,
+                      size: 24,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 24),
+              ],
             ),
-            const SizedBox(height: 30),
-            const Text(
-              "Your Courses",
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                color: Colors.black87,
-              ),
-            ),
-            const SizedBox(height: 16),
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'My Courses',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: Theme.of(context).textTheme.bodyLarge?.color,
+                      ),
+                    ),
+                    Row(
+                      children: [
+                        GestureDetector(
+                          onTap: () async {
+                            final result = await Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => const CreateCourseScreen()),
+                            );
+                            if (result == true && mounted) {
+                              _loadCourses();
+                            }
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: AppColors.primaryBlue.withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              children: const [
+                                Icon(
+                                  Icons.add_circle,
+                                  color: AppColors.primaryBlue,
+                                  size: 10,
+                                ),
+                                SizedBox(width: 4),
+                                Text(
+                                  'Add Course',
+                                  style: TextStyle(
+                                    color: AppColors.primaryBlue,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        TextButton(
+                          onPressed: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => const LecturerCoursesScreen(),
+                              ),
+                            );
+                          },
+                          child: const Text(
+                            'VIEW ALL',
+                            style: TextStyle(
+                              color: AppColors.primaryBlue,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ],
                 ),
               ),
             ),
             _courses.isEmpty
-                ? const SliverFillRemaining(
+                ? SliverFillRemaining(
                     hasScrollBody: false,
-                    child: Center(child: Text('No courses yet')),
+                    child: Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.school_outlined,
+                            size: 64,
+                            color: Colors.grey.shade300,
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            'No courses yet',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.grey.shade600,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Create a course to get started',
+                            style: TextStyle(
+                              color: Colors.grey.shade500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   )
                 : SliverPadding(
                     padding: const EdgeInsets.symmetric(horizontal: 24.0),
@@ -366,19 +549,52 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
                             name: course.name,
                             students: '0', // TODO: calculate from enrollments
                             accentColor: _accentColor,
-                            onStart: () {
+                            onDetails: () {
                               Navigator.push(
                                 context,
                                 MaterialPageRoute(
                                   builder: (_) => CourseDetailScreen(
-                                  courseCode: course.code,
-                                  courseName: course.name,
-                                  courseLocalId: course.id,
-                                  courseServerId: course.serverId,
+                                    courseCode: course.code,
+                                    courseName: course.name,
+                                    courseLocalId: course.id,
+                                    courseServerId: course.serverId,
+                                  ),
                                 ),
-                              ),
-                            );
-                          },
+                              );
+                            },
+                            onStartClass: () {
+                              showDialog(
+                                context: context,
+                                builder: (BuildContext dialogContext) {
+                                  return AlertDialog(
+                                    title: const Text('Start Class'),
+                                    content: Text('Start class for ${course.name}?'),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () => Navigator.pop(dialogContext),
+                                        child: const Text('Cancel'),
+                                      ),
+                                      TextButton(
+                                        onPressed: () {
+                                          Navigator.pop(dialogContext);
+                                          Navigator.push(
+                                            context,
+                                            MaterialPageRoute(
+                                              builder: (_) => ClassStartupScreen(
+                                                courseCode: course.code,
+                                                courseName: course.name,
+                                                courseLocalId: course.id,
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                        child: const Text('Start'),
+                                      ),
+                                    ],
+                                  );
+                                },
+                              );
+                            },
                         );
                         },
                         childCount: _courses.length,
@@ -388,21 +604,8 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () async {
-          final result = await Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => const CreateCourseScreen()),
-          );
-          // Refresh courses if one was created
-          if (result == true && mounted) {
-            _loadCourses();
-          }
-        },
-        label: const Text('Create New Course'),
-        icon: const Icon(Icons.add),
-        backgroundColor: _accentColor,
-      ),
+      floatingActionButton: null,
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
     );
   }
 
@@ -467,24 +670,9 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
                   itemCount: _courses.length,
                   itemBuilder: (context, index) {
                     final course = _courses[index];
-                    return ListTile(
-                      contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                      leading: CircleAvatar(
-                        backgroundColor: _accentColor.withOpacity(0.1),
-                        child: Text(
-                          course.code.replaceAll(RegExp(r'[^0-9]'), ''),
-                          style: TextStyle(
-                            color: _accentColor,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                      title: Text(
-                        course.name,
-                        style: const TextStyle(fontWeight: FontWeight.w600),
-                      ),
-                      subtitle: Text(course.code),
-                      trailing: Icon(Icons.arrow_forward_ios, size: 16, color: Colors.grey.shade400),
+                    final iconColor = _getIconColorForCourse(course.code);
+                    
+                    return GestureDetector(
                       onTap: () {
                         Navigator.pop(context);
                         Navigator.push(
@@ -499,6 +687,75 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
                           ),
                         );
                       },
+                      child: Container(
+                        margin: const EdgeInsets.only(bottom: 12),
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Theme.of(context).cardColor,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: Theme.of(context).brightness == Brightness.dark 
+                              ? Colors.grey.shade800 
+                              : Colors.grey.shade200
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 56,
+                              height: 56,
+                              decoration: BoxDecoration(
+                                color: iconColor.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Icon(
+                                Icons.book,
+                                color: iconColor,
+                                size: 28,
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: iconColor.withOpacity(0.15),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Text(
+                                      course.code,
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 13,
+                                        color: iconColor,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    course.name,
+                                    style: TextStyle(
+                                      color: Theme.of(context).textTheme.bodyLarge?.color,
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Icon(
+                              Icons.chevron_right,
+                              color: Colors.grey.shade400,
+                              size: 24,
+                            ),
+                          ],
+                        ),
+                      ),
                     );
                   },
                 ),
@@ -508,6 +765,16 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
         );
       },
     );
+  }
+
+  Color _getIconColorForCourse(String code) {
+    final colors = [
+      const Color(0xFF0D47A1), // Blue
+      const Color(0xFF7B1FA2), // Purple
+      const Color(0xFFE65100), // Orange
+      const Color(0xFF00796B), // Teal
+    ];
+    return colors[code.hashCode % colors.length];
   }
 
   void _showProfileSheet(BuildContext context) {
@@ -643,80 +910,134 @@ class _CourseCard extends StatelessWidget {
   final String name;
   final String students;
   final Color accentColor;
-  final VoidCallback onStart;
+  final VoidCallback onDetails;
+  final VoidCallback onStartClass;
 
   const _CourseCard({
     required this.code,
     required this.name,
     required this.students,
     required this.accentColor,
-    required this.onStart,
+    required this.onDetails,
+    required this.onStartClass,
   });
+
+  // Get icon color based on course code prefix
+  Color _getIconColor() {
+    final colors = [
+      const Color(0xFF0D47A1), // Blue
+      const Color(0xFF7B1FA2), // Purple
+      const Color(0xFFE65100), // Orange
+      const Color(0xFF00796B), // Teal
+    ];
+    return colors[code.hashCode % colors.length];
+  }
+
+  IconData _getCourseIcon() {
+    return Icons.book;
+  }
 
   @override
   Widget build(BuildContext context) {
+    final iconColor = _getIconColor();
+    
     return GestureDetector(
-      onTap: onStart,
+      onTap: onDetails,
       child: Container(
-        margin: const EdgeInsets.only(bottom: 16),
+        margin: const EdgeInsets.only(bottom: 12),
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: Theme.of(context).cardColor,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.grey.shade100),
           boxShadow: [
             BoxShadow(
-              color: Colors.grey.withOpacity(0.05),
-              blurRadius: 10,
-              offset: const Offset(0, 4),
+              color: Colors.black.withOpacity(0.04),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
             ),
           ],
         ),
-        child: Row(
+        child: Column(
           children: [
-            Container(
-              width: 50,
-              height: 50,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: accentColor.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                code.replaceAll(RegExp(r'[^0-9]'), ''),
-                style: TextStyle(
-                  color: accentColor,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
+            Row(
+              children: [
+                Container(
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    color: iconColor.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    _getCourseIcon(),
+                    color: iconColor,
+                    size: 28,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: iconColor.withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          code,
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                            color: iconColor,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        name,
+                        style: TextStyle(
+                          color: Theme.of(context).textTheme.bodyLarge?.color ?? Colors.black,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(
+                  Icons.chevron_right,
+                  color: Colors.grey.shade400,
+                  size: 24,
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              height: 44,
+              child: ElevatedButton.icon(
+                onPressed: onStartClass,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: iconColor,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  elevation: 0,
+                ),
+                icon: const Icon(Icons.play_arrow, size: 18, color: Colors.white),
+                label: const Text(
+                  'Start Class',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    name,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                    ),
-                  ),
-                  Text(
-                    '$students Students',
-                    style: TextStyle(
-                      color: Colors.grey.shade500,
-                      fontSize: 13,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Icon(
-              Icons.arrow_forward_ios,
-              size: 16,
-              color: Colors.grey.shade400,
             ),
           ],
         ),

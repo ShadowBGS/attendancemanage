@@ -4,10 +4,14 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
+import 'package:drift/drift.dart' as drift;
 
 import 'complete_profile_screen.dart';
-import 'lecturer_dashboard.dart';
-import 'student_dashboard.dart';
+import 'lecturer_main_wrapper.dart';
+import 'student_main_wrapper.dart';
+import 'email_verification_screen.dart';
+import '../db/database_provider.dart';
+import '../db/database.dart';
 
 class RegisterScreen extends StatefulWidget {
   final String role;
@@ -74,8 +78,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   void _goToDashboard() {
     final Widget destination = widget.role == 'student'
-        ? const StudentDashboard()
-        : const LecturerDashboard();
+        ? const StudentMainWrapper()
+        : const LecturerMainWrapper();
 
     Navigator.pushReplacement(
       context,
@@ -277,8 +281,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           final email = _emailController.text.trim();
                           final password = _passwordController.text;
 
-                          if (firstName.isEmpty || lastName.isEmpty || email.isEmpty || password.isEmpty || department.isEmpty) {
-                            _showError('First name, last name, email, password, and department are required.');
+                          if (firstName.isEmpty || lastName.isEmpty || email.isEmpty || password.isEmpty || department.isEmpty || extId.isEmpty) {
+                            _showError('All fields are required.');
                             return;
                           }
 
@@ -290,6 +294,24 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           await cred.user?.updateDisplayName(fullName);
                           // Ensure ID token reflects latest profile changes
                           await cred.user?.reload();
+                          
+                          // Redirect to email verification screen
+                          if (!mounted) return;
+                          final verified = await Navigator.push<bool>(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => EmailVerificationScreen(
+                                role: widget.role,
+                                user: cred.user!,
+                              ),
+                            ),
+                          );
+                          
+                          if (verified != true) {
+                            _showError('Email verification is required to complete registration.');
+                            return;
+                          }
+                          
                           final idToken = await cred.user?.getIdToken(true);
                           if (idToken == null) {
                             _showError('Could not get ID token.');
@@ -311,6 +333,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           }
 
                           // Mark profile complete immediately for email sign-up.
+                          print('📤 Sending profile data: extId=$extId, dept=$department, name=$fullName');
                           final completeResp = await http.post(
                             Uri.parse(_backendBaseUrl()).resolve('/profile/complete'),
                             headers: {
@@ -324,9 +347,34 @@ class _RegisterScreenState extends State<RegisterScreen> {
                             }),
                           );
 
+                          print('✅ Profile complete response: ${completeResp.statusCode}');
+                          if (completeResp.statusCode >= 200 && completeResp.statusCode < 300) {
+                            print('📥 Response body: ${completeResp.body}');
+                          }
+
                           if (completeResp.statusCode < 200 || completeResp.statusCode >= 300) {
                             _showError('Profile save failed (${completeResp.statusCode}).');
                             return;
+                          }
+
+                          // Save to local database as well
+                          try {
+                            final db = DatabaseProvider.of(context);
+                            await db.upsertUser(
+                              UsersCompanion.insert(
+                                firebaseUid: cred.user!.uid,
+                                email: email,
+                                name: fullName,
+                                role: widget.role,
+                                externalId: drift.Value(extId),
+                                department: drift.Value(department),
+                                profileCompleted: const drift.Value(true),
+                                lastSyncedAt: drift.Value(DateTime.now()),
+                              ),
+                            );
+                          } catch (e) {
+                            print('⚠️ Local DB save failed: $e');
+                            // Don't block user if local save fails
                           }
 
                           if (!mounted) return;

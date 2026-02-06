@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:drift_db_viewer/drift_db_viewer.dart';
 import '../db/database_provider.dart';
 import '../services/sync_service.dart';
+import '../main.dart' show appThemeMode;
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -13,11 +15,12 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _notificationsEnabled = true;
   bool _emailNotifications = true;
-  bool _darkMode = false;
 
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
+    final isDarkMode = Theme.of(context).brightness == Brightness.dark;
+    print('🎨 Settings screen rebuilt. isDarkMode=$isDarkMode, brightness=${Theme.of(context).brightness}');
     
     return Scaffold(
       appBar: AppBar(
@@ -111,14 +114,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 secondary: const Icon(Icons.dark_mode_outlined),
                 title: const Text('Dark Mode'),
                 subtitle: const Text('Use dark theme'),
-                value: _darkMode,
+                value: isDarkMode,
                 onChanged: (value) {
-                  setState(() => _darkMode = value);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Dark mode coming in future update'),
-                    ),
-                  );
+                  print('🌙 Dark mode toggle: value=$value, isDarkMode=$isDarkMode');
+                  print('📝 Current appThemeMode before: ${appThemeMode.value}');
+                  appThemeMode.value = value ? ThemeMode.dark : ThemeMode.light;
+                  print('📝 Current appThemeMode after: ${appThemeMode.value}');
                 },
               ),
             ],
@@ -171,12 +172,69 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 },
               ),
               ListTile(
+                leading: const Icon(Icons.clear_all),
+                title: const Text('Clear Sync Queue'),
+                subtitle: const Text('Remove all pending sync items'),
+                trailing: const Icon(Icons.warning_amber),
+                onTap: () async {
+                  final confirm = await showDialog<bool>(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: const Text('Clear Sync Queue?'),
+                      content: const Text('This will delete all pending sync items. This action cannot be undone.'),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context, false),
+                          child: const Text('Cancel'),
+                        ),
+                        TextButton(
+                          onPressed: () => Navigator.pop(context, true),
+                          child: const Text('Clear', style: TextStyle(color: Colors.red)),
+                        ),
+                      ],
+                    ),
+                  );
+                  
+                  if (confirm == true && mounted) {
+                    final db = DatabaseProvider.of(context);
+                    await db.clearSyncQueue();
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Sync queue cleared'),
+                        backgroundColor: Colors.green,
+                      ),
+                    );
+                  }
+                },
+              ),
+              ListTile(
                 leading: const Icon(Icons.privacy_tip_outlined),
                 title: const Text('Privacy Policy'),
                 trailing: const Icon(Icons.open_in_new),
                 onTap: () {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('Privacy policy coming soon')),
+                  );
+                },
+              ),
+            ],
+          ),
+          const Divider(height: 1),
+          _buildSection(
+            'Developer',
+            [
+              ListTile(
+                leading: const Icon(Icons.storage_outlined),
+                title: const Text('Inspect Local Database'),
+                subtitle: const Text('View tables, rows, and schema'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () {
+                  final db = DatabaseProvider.of(context);
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (context) => DriftDbViewer(db),
+                    ),
                   );
                 },
               ),

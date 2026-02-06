@@ -3,21 +3,34 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 
+import '../db/database.dart';
 import '../db/database_provider.dart';
-import '../theme/app_colors.dart';
 
-class CreateCourseScreen extends StatefulWidget {
-  const CreateCourseScreen({super.key});
+class EditCourseScreen extends StatefulWidget {
+  final Course course;
+
+  const EditCourseScreen({
+    super.key,
+    required this.course,
+  });
 
   @override
-  State<CreateCourseScreen> createState() => _CreateCourseScreenState();
+  State<EditCourseScreen> createState() => _EditCourseScreenState();
 }
 
-class _CreateCourseScreenState extends State<CreateCourseScreen> {
-  final _codeController = TextEditingController();
-  final _nameController = TextEditingController();
-  final _descriptionController = TextEditingController();
+class _EditCourseScreenState extends State<EditCourseScreen> {
+  late TextEditingController _codeController;
+  late TextEditingController _nameController;
+  late TextEditingController _descriptionController;
   bool _isLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _codeController = TextEditingController(text: widget.course.code);
+    _nameController = TextEditingController(text: widget.course.name);
+    _descriptionController = TextEditingController(text: widget.course.description ?? '');
+  }
 
   @override
   void dispose() {
@@ -48,7 +61,7 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
     );
   }
 
-  Future<void> _createCourse() async {
+  Future<void> _saveCourse() async {
     final code = _codeController.text.trim();
     final name = _nameController.text.trim();
     final description = _descriptionController.text.trim();
@@ -73,8 +86,14 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
         return;
       }
 
-      final response = await http.post(
-        Uri.parse(_backendBaseUrl()).resolve('/courses/create'),
+      final serverId = widget.course.serverId;
+      if (serverId == null || serverId.isEmpty) {
+        _showError('Course not synced yet. Cannot edit.');
+        return;
+      }
+
+      final response = await http.patch(
+        Uri.parse(_backendBaseUrl()).resolve('/courses/$serverId'),
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $idToken',
@@ -88,36 +107,23 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
 
       if (response.statusCode == 200) {
         try {
-          final decoded = jsonDecode(response.body);
-          if (decoded is Map) {
-            final serverId = decoded['course_id']?.toString();
-            final serverCode = decoded['course_code']?.toString() ?? code;
-            final serverName = decoded['course_name']?.toString() ?? name;
-            final lecturerId = decoded['lecturer_id'] is int ? decoded['lecturer_id'] as int : null;
-
-            if (serverId != null) {
-              final db = DatabaseProvider.of(context);
-              await db.upsertCourseFromServer(
-                serverId: serverId,
-                code: serverCode,
-                name: serverName,
-                description: decoded['description']?.toString(),
-                lecturerId: lecturerId,
-              );
-            }
-          }
+          final db = DatabaseProvider.of(context);
+          await db.updateCourse(
+            widget.course.id,
+            code: code,
+            name: name,
+            description: description.isNotEmpty ? description : null,
+          );
         } catch (_) {
-          // Ignore local caching errors; backend already created it.
+          // Ignore local caching errors; backend already updated it.
         }
 
-        _showSuccess('Course created successfully!');
-        if (mounted) Navigator.pop(context, true); // Return true to indicate success
+        _showSuccess('Course updated successfully!');
+        if (mounted) Navigator.pop(context, true);
       } else if (response.statusCode == 409) {
         _showError('Course code already exists.');
-      } else if (response.statusCode == 403) {
-        _showError('Only lecturers can create courses.');
       } else {
-        String errorMsg = 'Failed to create course.';
+        String errorMsg = 'Failed to update course.';
         try {
           final decoded = jsonDecode(response.body);
           if (decoded is Map && decoded['detail'] != null) {
@@ -135,6 +141,8 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
 
   @override
   Widget build(BuildContext context) {
+    const Color primaryBlue = Color(0xFF0D47A1);
+
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: SafeArea(
@@ -144,7 +152,7 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
             Container(
               width: double.infinity,
               decoration: const BoxDecoration(
-                color: AppColors.primaryBlue,
+                color: primaryBlue,
               ),
               child: SafeArea(
                 bottom: false,
@@ -154,14 +162,14 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
                     children: [
                       IconButton(
                         onPressed: () => Navigator.pop(context),
-                        icon: const Icon(Icons.arrow_back, color: AppColors.white),
+                        icon: const Icon(Icons.arrow_back, color: Colors.white),
                       ),
                       const Expanded(
                         child: Text(
-                          'Create Course',
+                          'Edit Course',
                           textAlign: TextAlign.center,
                           style: TextStyle(
-                            color: AppColors.white,
+                            color: Colors.white,
                             fontSize: 22,
                             fontWeight: FontWeight.bold,
                           ),
@@ -185,20 +193,20 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
                       width: double.infinity,
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: AppColors.primaryBlue.withOpacity(0.1),
+                        color: primaryBlue.withOpacity(0.1),
                         borderRadius: BorderRadius.circular(12),
                         border: Border.all(
-                          color: AppColors.primaryBlue.withOpacity(0.2),
+                          color: primaryBlue.withOpacity(0.2),
                         ),
                       ),
                       child: Row(
                         children: [
-                          Icon(Icons.info_outline, color: AppColors.primaryBlue),
+                          Icon(Icons.info_outline, color: primaryBlue),
                           const SizedBox(width: 12),
                           Expanded(
                             child: Text(
-                              'Fill in the course details below to create a new course.',
-                              style: TextStyle(color: AppColors.primaryBlue, fontSize: 13),
+                              'Update the course details below.',
+                              style: TextStyle(color: primaryBlue, fontSize: 13),
                             ),
                           ),
                         ],
@@ -210,11 +218,11 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: AppColors.white,
+                        color: Theme.of(context).cardColor,
                         borderRadius: BorderRadius.circular(16),
                         boxShadow: [
                           BoxShadow(
-                            color: AppColors.black.withOpacity(0.04),
+                            color: Colors.black.withOpacity(0.04),
                             blurRadius: 10,
                             offset: const Offset(0, 4),
                           ),
@@ -225,10 +233,10 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
                         children: [
                           Text(
                             'Course Code',
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.w600,
-                              color: AppColors.black,
+                              color: Theme.of(context).textTheme.bodyLarge?.color,
                               letterSpacing: 0.3,
                             ),
                           ),
@@ -238,20 +246,22 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
                             enabled: !_isLoading,
                             decoration: InputDecoration(
                               hintText: 'e.g. CS101, MTH202',
-                              prefixIcon: const Icon(Icons.label_important_outline, color: AppColors.primaryBlue),
+                              prefixIcon: const Icon(Icons.label_important_outline, color: primaryBlue),
                               filled: true,
-                              fillColor: AppColors.white,
+                              fillColor: Theme.of(context).brightness == Brightness.dark
+                                  ? Colors.grey.shade800
+                                  : Colors.white,
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: AppColors.grey),
+                                borderSide: BorderSide(color: Colors.grey[300]!),
                               ),
                               enabledBorder: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: AppColors.grey),
+                                borderSide: BorderSide(color: Colors.grey[300]!),
                               ),
                               disabledBorder: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: AppColors.grey),
+                                borderSide: BorderSide(color: Colors.grey[200]!),
                               ),
                               contentPadding: const EdgeInsets.symmetric(horizontal: 0, vertical: 0),
                             ),
@@ -265,11 +275,11 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: AppColors.white,
+                        color: Theme.of(context).cardColor,
                         borderRadius: BorderRadius.circular(16),
                         boxShadow: [
                           BoxShadow(
-                            color: AppColors.black.withOpacity(0.04),
+                            color: Colors.black.withOpacity(0.04),
                             blurRadius: 10,
                             offset: const Offset(0, 4),
                           ),
@@ -280,10 +290,10 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
                         children: [
                           Text(
                             'Course Name',
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.w600,
-                              color: AppColors.black,
+                              color: Theme.of(context).textTheme.bodyLarge?.color,
                               letterSpacing: 0.3,
                             ),
                           ),
@@ -293,20 +303,22 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
                             enabled: !_isLoading,
                             decoration: InputDecoration(
                               hintText: 'e.g. Data Structures, Calculus II',
-                              prefixIcon: const Icon(Icons.book_outlined, color: AppColors.primaryBlue),
+                              prefixIcon: const Icon(Icons.book_outlined, color: primaryBlue),
                               filled: true,
-                              fillColor: AppColors.white,
+                              fillColor: Theme.of(context).brightness == Brightness.dark
+                                  ? Colors.grey.shade800
+                                  : Colors.white,
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: AppColors.grey),
+                                borderSide: BorderSide(color: Colors.grey[300]!),
                               ),
                               enabledBorder: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: AppColors.grey),
+                                borderSide: BorderSide(color: Colors.grey[300]!),
                               ),
                               disabledBorder: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: AppColors.grey),
+                                borderSide: BorderSide(color: Colors.grey[200]!),
                               ),
                               contentPadding: const EdgeInsets.symmetric(horizontal: 0, vertical: 0),
                             ),
@@ -320,11 +332,11 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: AppColors.white,
+                        color: Theme.of(context).cardColor,
                         borderRadius: BorderRadius.circular(16),
                         boxShadow: [
                           BoxShadow(
-                            color: AppColors.black.withOpacity(0.04),
+                            color: Colors.black.withOpacity(0.04),
                             blurRadius: 10,
                             offset: const Offset(0, 4),
                           ),
@@ -335,10 +347,10 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
                         children: [
                           Text(
                             'Description (Optional)',
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.w600,
-                              color: AppColors.black,
+                              color: Theme.of(context).textTheme.bodyLarge?.color,
                               letterSpacing: 0.3,
                             ),
                           ),
@@ -349,21 +361,23 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
                             maxLines: 4,
                             decoration: InputDecoration(
                               hintText: 'Enter course description...',
-                              prefixIcon: const Icon(Icons.description_outlined, color: AppColors.primaryBlue),
+                              prefixIcon: const Icon(Icons.description_outlined, color: primaryBlue),
                               filled: true,
-                              fillColor: AppColors.white,
+                              fillColor: Theme.of(context).brightness == Brightness.dark
+                                  ? Colors.grey.shade800
+                                  : Colors.white,
                               alignLabelWithHint: true,
                               border: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: AppColors.grey),
+                                borderSide: BorderSide(color: Colors.grey[300]!),
                               ),
                               enabledBorder: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: AppColors.grey),
+                                borderSide: BorderSide(color: Colors.grey[300]!),
                               ),
                               disabledBorder: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide(color: AppColors.grey),
+                                borderSide: BorderSide(color: Colors.grey[200]!),
                               ),
                               contentPadding: const EdgeInsets.symmetric(horizontal: 0, vertical: 12),
                             ),
@@ -373,15 +387,15 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
                     ),
                     const SizedBox(height: 28),
 
-                    // Create Button
+                    // Save Button
                     SizedBox(
                       width: double.infinity,
                       height: 56,
                       child: ElevatedButton.icon(
-                        onPressed: _isLoading ? null : _createCourse,
+                        onPressed: _isLoading ? null : _saveCourse,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: AppColors.primaryBlue,
-                          disabledBackgroundColor: AppColors.grey,
+                          backgroundColor: primaryBlue,
+                          disabledBackgroundColor: Colors.grey[300],
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(16),
                           ),
@@ -393,14 +407,14 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
                                 width: 20,
                                 child: CircularProgressIndicator(
                                   strokeWidth: 2,
-                                  valueColor: AlwaysStoppedAnimation<Color>(AppColors.white),
+                                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                                 ),
                               )
-                            : const Icon(Icons.add_circle, color: AppColors.white),
+                            : const Icon(Icons.save, color: Colors.white),
                         label: const Text(
-                          'Create Course',
+                          'Save Changes',
                           style: TextStyle(
-                            color: AppColors.white,
+                            color: Colors.white,
                             fontWeight: FontWeight.bold,
                             fontSize: 16,
                           ),
@@ -419,14 +433,14 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(16),
                           ),
-                          side: BorderSide(color: AppColors.grey),
+                          side: BorderSide(color: Colors.grey[300]!),
                         ),
-                        icon: const Icon(Icons.close, color: AppColors.grey),
+                        icon: const Icon(Icons.close, color: Colors.grey),
                         label: const Text(
                           'Cancel',
                           style: TextStyle(
                             fontWeight: FontWeight.bold,
-                            color: AppColors.grey,
+                            color: Colors.grey,
                           ),
                         ),
                       ),
@@ -437,50 +451,6 @@ class _CreateCourseScreenState extends State<CreateCourseScreen> {
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildLabel(String label) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8.0),
-      child: Text(
-        label,
-        style: const TextStyle(
-          fontSize: 15,
-          fontWeight: FontWeight.w600,
-          color: AppColors.black,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTextField(
-    String hint,
-    TextEditingController controller,
-    IconData icon, {
-    bool enabled = true,
-  }) {
-    return TextField(
-      controller: controller,
-      enabled: enabled,
-      decoration: InputDecoration(
-        hintText: hint,
-        prefixIcon: Icon(icon),
-        filled: true,
-        fillColor: enabled ? AppColors.white : AppColors.grey,
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide(color: AppColors.grey),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide(color: AppColors.grey),
-        ),
-        disabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide(color: AppColors.grey),
         ),
       ),
     );

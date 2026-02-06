@@ -4,10 +4,12 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
+import '../db/database_provider.dart';
 import 'register_screen.dart';
-import 'lecturer_dashboard.dart';
-import 'student_dashboard.dart';
+import 'lecturer_main_wrapper.dart';
+import 'student_main_wrapper.dart';
 import 'complete_profile_screen.dart';
+import 'email_verification_screen.dart';
 
 class AuthScreen extends StatefulWidget {
   final String role;
@@ -59,6 +61,39 @@ class _AuthScreenState extends State<AuthScreen> {
     if (user == null) {
       _showError('Not signed in.');
       return;
+    }
+
+    // Check if a different user is logging in - if so, clear cached data
+    try {
+      final database = DatabaseProvider.of(context);
+      final cachedUser = await database.getLatestUser();
+      if (cachedUser != null && cachedUser.firebaseUid != user.uid) {
+        print('🔄 Different user detected, clearing cached data...');
+        await database.clearAllUserData();
+      }
+    } catch (e) {
+      print('Error checking cached user: $e');
+    }
+
+    // Check if email needs verification (for email/password signups)
+    if (!user.emailVerified) {
+      print('📧 Email not verified, redirecting to verification screen');
+      if (!mounted) return;
+      final verified = await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(
+          builder: (context) => EmailVerificationScreen(
+            role: widget.role,
+            user: user,
+          ),
+        ),
+      );
+      
+      // If user didn't complete verification, stop here
+      if (verified != true) return;
+      
+      // Reload user to get updated emailVerified status
+      await user.reload();
     }
 
     final String baseUrl = _backendBaseUrl();
@@ -129,8 +164,8 @@ class _AuthScreenState extends State<AuthScreen> {
 
   void _goToDashboard() {
     final Widget destination = widget.role == 'student'
-        ? const StudentDashboard()
-        : const LecturerDashboard();
+        ? const StudentMainWrapper()
+        : const LecturerMainWrapper();
 
     Navigator.pushReplacement(
       context,

@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-import 'lecturer_dashboard.dart';
-import 'student_dashboard.dart';
+import 'package:drift/drift.dart' as drift;
+import 'lecturer_main_wrapper.dart';
+import 'student_main_wrapper.dart';
+import '../db/database_provider.dart';
+import '../db/database.dart';
 
 class CompleteProfileScreen extends StatefulWidget {
   final String role;
@@ -22,17 +25,12 @@ class CompleteProfileScreen extends StatefulWidget {
 
 class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
   final TextEditingController _externalIdController = TextEditingController();
-  String? selectedDepartment;
-  final List<String> departments = [
-    'Computer Science',
-    'Engineering',
-    'Business',
-    'Arts',
-  ];
+  final TextEditingController _departmentController = TextEditingController();
 
   @override
   void dispose() {
     _externalIdController.dispose();
+    _departmentController.dispose();
     super.dispose();
   }
 
@@ -47,7 +45,7 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
         : Colors.blue;
 
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(32.0),
@@ -78,34 +76,26 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
 
               // ID Field
               _buildInputLabel(
-                widget.role == 'student' ? "Student ID" : "Lecturer ID",
+                widget.role == 'student' ? "Matric Number" : "Lecturer ID",
               ),
               TextField(
                 controller: _externalIdController,
                 decoration: _inputDecoration(
-                  "e.g. 2024/CS/001",
+                  widget.role == 'student' ? "e.g. 2024/CS/001" : "e.g. LEC/2024/001",
                   Icons.badge_outlined,
                 ),
               ),
 
               const SizedBox(height: 24),
 
-              // Department Dropdown
+              // Department Text Field
               _buildInputLabel("Department"),
-              DropdownButtonFormField<String>(
-                initialValue: selectedDepartment,
+              TextField(
+                controller: _departmentController,
                 decoration: _inputDecoration(
-                  "Select Department",
+                  "e.g. Computer Science",
                   Icons.account_balance_outlined,
                 ),
-                items: departments
-                    .map(
-                      (dept) =>
-                          DropdownMenuItem(value: dept, child: Text(dept)),
-                    )
-                    .toList(),
-                onChanged: (value) =>
-                    setState(() => selectedDepartment = value),
               ),
 
               const SizedBox(height: 48),
@@ -117,9 +107,9 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                 child: ElevatedButton(
                   onPressed: () async {
                     final extId = _externalIdController.text.trim();
-                    final dept = selectedDepartment?.trim() ?? '';
+                    final dept = _departmentController.text.trim();
                     if (extId.isEmpty || dept.isEmpty) {
-                      _showSnack('ID and department are required.');
+                      _showSnack('Matric number and department are required.');
                       return;
                     }
 
@@ -130,6 +120,7 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                     }
                     final idToken = await user.getIdToken();
 
+                    print('📤 Sending profile completion: extId=$extId, dept=$dept');
                     final resp = await http.post(
                       Uri.parse(widget.baseUrl).resolve('/profile/complete'),
                       headers: {
@@ -142,6 +133,7 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                       }),
                     );
 
+                    print('✅ Profile complete response: ${resp.statusCode}');
                     if (resp.statusCode < 200 || resp.statusCode >= 300) {
                       String extra = '';
                       try {
@@ -154,10 +146,32 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                       return;
                     }
 
+                    // Save to local database
+                    try {
+                      final db = DatabaseProvider.of(context);
+                      await db.upsertUser(
+                        UsersCompanion.insert(
+                          firebaseUid: user.uid,
+                          email: user.email ?? '',
+                          name: user.displayName ?? '',
+                          role: widget.role,
+                          externalId: drift.Value(extId),
+                          department: drift.Value(dept),
+                          profileCompleted: const drift.Value(true),
+                          lastSyncedAt: drift.Value(DateTime.now()),
+                        ),
+                      );
+                      print('✅ Local database updated successfully');
+                    } catch (e) {
+                      print('⚠️ Local DB save failed: $e');
+                      _showSnack('Database error: $e');
+                      return;
+                    }
+
                     if (!mounted) return;
                     final Widget destination = widget.role == 'student'
-                        ? const StudentDashboard()
-                        : const LecturerDashboard();
+                        ? const StudentMainWrapper()
+                        : const LecturerMainWrapper();
                     Navigator.pushAndRemoveUntil(
                       context,
                       MaterialPageRoute(builder: (_) => destination),

@@ -52,21 +52,22 @@ class RoleCard extends StatelessWidget {
                   children: [
                     Text(
                       title,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 16,
+                        color: Theme.of(context).textTheme.bodyLarge?.color,
                       ),
                     ),
                     Text(
                       subtitle,
-                      style: TextStyle(color: Colors.grey[600], fontSize: 12),
+                      style: TextStyle(color: Theme.of(context).textTheme.bodyMedium?.color, fontSize: 12),
                     ),
                   ],
                 ),
               ),
               Icon(
                 isSelected ? Icons.check_circle : Icons.arrow_forward_ios,
-                color: isSelected ? highlightColor : Colors.grey[400],
+                color: isSelected ? highlightColor : Theme.of(context).disabledColor,
                 size: isSelected ? 24 : 16,
               ),
             ],

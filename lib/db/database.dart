@@ -145,6 +145,13 @@ class AppDatabase extends _$AppDatabase {
     }
   }
 
+  // ========== STUDENT OPERATIONS ==========
+
+  Future<User?> getStudentByUserId(int userId) async {
+    return await (select(users)..where((u) => u.id.equals(userId)))
+        .getSingleOrNull();
+  }
+
   // ========== COURSE OPERATIONS ==========
 
   Future<List<Course>> getAllCourses() {
@@ -164,8 +171,16 @@ class AppDatabase extends _$AppDatabase {
     return (select(courses)..where((c) => c.id.equals(courseLocalId))).getSingleOrNull();
   }
 
+  Future<Course?> getCourseById(int courseId) {
+    return (select(courses)..where((c) => c.id.equals(courseId))).getSingleOrNull();
+  }
+
   Future<Course?> getCourseByServerId(String serverId) {
     return (select(courses)..where((c) => c.serverId.equals(serverId))).getSingleOrNull();
+  }
+
+  Future<Course?> getCourseByCode(String code) {
+    return (select(courses)..where((c) => c.code.equals(code))).getSingleOrNull();
   }
 
   Future<int> upsertCourseFromServer({
@@ -193,6 +208,25 @@ class AppDatabase extends _$AppDatabase {
     return into(courses).insert(row);
   }
 
+  Future<void> updateCourse(
+    int courseId, {
+    String? code,
+    String? name,
+    String? description,
+  }) async {
+    await (update(courses)..where((c) => c.id.equals(courseId))).write(
+      CoursesCompanion(
+        code: code != null ? Value(code) : const Value.absent(),
+        name: name != null ? Value(name) : const Value.absent(),
+        description: description != null ? Value(description) : const Value.absent(),
+      ),
+    );
+  }
+
+  Future<void> deleteCourse(int courseId) async {
+    await (delete(courses)..where((c) => c.id.equals(courseId))).go();
+  }
+
   // ========== SESSION OPERATIONS ==========
 
   Future<List<Session>> getSessionsByCourse(int courseId) {
@@ -202,6 +236,10 @@ class AppDatabase extends _$AppDatabase {
 
   Future<List<Session>> getActiveSessions() {
     return (select(sessions)..where((s) => s.status.equals('active'))).get();
+  }
+
+  Future<List<Session>> getAllSessions() {
+    return select(sessions).get();
   }
 
   Future<int> insertSession(SessionsCompanion session) async {
@@ -355,9 +393,8 @@ class AppDatabase extends _$AppDatabase {
     final session = await (select(sessions)..where((s) => s.id.equals(insertedRecord.sessionId))).getSingleOrNull();
     final student = await (select(users)..where((u) => u.id.equals(insertedRecord.studentId))).getSingleOrNull();
     
-    // Add to sync queue with complete payload
+    // Add to sync queue with complete payload (no attendance_id for create)
     await _queueSync('attendance', id, 'create', {
-      'attendance_id': insertedRecord.serverId,
       'session_id': session?.serverId,
       'student_firebase_uid': student?.firebaseUid,
       'status': insertedRecord.status,
@@ -418,11 +455,71 @@ class AppDatabase extends _$AppDatabase {
     ];
   }
 
+  Future<Session?> getSessionById(int id) {
+    return (select(sessions)..where((s) => s.id.equals(id))).getSingleOrNull();
+  }
+
+  Future<List<AttendanceRecord>> getAttendanceBySessionId(int sessionId) {
+    return (select(attendanceRecords)..where((a) => a.sessionId.equals(sessionId))).get();
+  }
+
+  Future<void> updateSessionStatus(int sessionId, String status, DateTime endTime) {
+    return (update(sessions)..where((s) => s.id.equals(sessionId))).write(
+      SessionsCompanion(
+        status: Value(status),
+        endTime: Value(endTime),
+      ),
+    );
+  }
+
+  Future<void> updateSessionServerId(int sessionId, String serverId) {
+    return (update(sessions)..where((s) => s.id.equals(sessionId))).write(
+      SessionsCompanion(
+        serverId: Value(serverId),
+        synced: const Value(true),
+      ),
+    );
+  }
+
+  Future<void> markAttendanceSynced(int attendanceId) {
+    return (update(attendanceRecords)..where((a) => a.id.equals(attendanceId))).write(
+      const AttendanceRecordsCompanion(
+        synced: Value(true),
+      ),
+    );
+  }
+
+  Future<User?> getUserById(int id) {
+    return (select(users)..where((u) => u.id.equals(id))).getSingleOrNull();
+  }
+
+  /// Get the most recently cached user (for user-change detection on login)
+  Future<User?> getLatestUser() {
+    return (select(users)..orderBy([(u) => OrderingTerm.desc(u.id)])..limit(1))
+        .getSingleOrNull();
+  }
+
   // ========== SYNC OPERATIONS ==========
 
   Future<List<SyncQueueData>> getPendingSyncItems() {
     return (select(syncQueue)..orderBy([(t) => OrderingTerm.asc(t.createdAt)]))
         .get();
+  }
+
+  Future<void> addToSyncQueue({
+    required String entityType,
+    required String operation,
+    required String payload,
+    int entityLocalId = 0,
+  }) {
+    return into(syncQueue).insert(
+      SyncQueueCompanion.insert(
+        entityType: entityType,
+        entityLocalId: entityLocalId,
+        operation: operation,
+        payload: payload,
+      ),
+    );
   }
 
   Future<void> _queueSync(
@@ -456,6 +553,59 @@ class AppDatabase extends _$AppDatabase {
       SyncQueueCompanion(
         retryCount: Value(item.retryCount + 1),
         lastError: Value(error),
+      ),
+    );
+  }
+
+  Future<void> clearSyncQueue() {
+    return delete(syncQueue).go();
+  }
+
+  /// Clear all user data when logging out (for privacy/security)
+  Future<void> clearAllUserData() async {
+    await delete(attendanceRecords).go();
+    await delete(sessions).go();
+    await delete(enrollments).go();
+    await delete(courses).go();
+    await delete(users).go();
+    await delete(syncQueue).go();
+  }
+
+  /// Update attendance record's server ID after successful sync
+  Future<void> updateAttendanceServerId(int attendanceId, String serverId) {
+    return (update(attendanceRecords)..where((a) => a.id.equals(attendanceId))).write(
+      AttendanceRecordsCompanion(
+        serverId: Value(serverId),
+        synced: const Value(true),
+      ),
+    );
+  }
+
+  /// Check for existing attendance by student and session to prevent duplicates
+  Future<AttendanceRecord?> getAttendanceByStudentAndSession(
+    int studentId,
+    int sessionId,
+  ) {
+    return (select(attendanceRecords)
+      ..where((a) => a.studentId.equals(studentId) & a.sessionId.equals(sessionId)))
+      .getSingleOrNull();
+  }
+
+  /// Update existing attendance record from server data
+  Future<void> updateAttendanceFromServer(
+    int attendanceId,
+    String serverId,
+    String status,
+    DateTime markedAt,
+    bool faceVerified,
+  ) {
+    return (update(attendanceRecords)..where((a) => a.id.equals(attendanceId))).write(
+      AttendanceRecordsCompanion(
+        serverId: Value(serverId),
+        status: Value(status),
+        markedAt: Value(markedAt),
+        faceVerified: Value(faceVerified),
+        synced: const Value(true),
       ),
     );
   }

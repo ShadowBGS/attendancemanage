@@ -4,23 +4,31 @@ import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter_p2p_connection/flutter_p2p_connection.dart';
+import 'package:intl/intl.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 
 import '../models/wifi_direct_payload.dart';
 import '../services/wifi_direct_session_service.dart';
+import '../services/sync_service.dart';
 import '../db/database_provider.dart';
 import '../db/database.dart';
+import '../theme/app_colors.dart';
 
 class WifiDirectHostScreen extends StatefulWidget {
   final String courseCode;
   final String courseName;
   final int courseLocalId;
+  final DateTime sessionDate;
 
-  const WifiDirectHostScreen({
+  WifiDirectHostScreen({
     super.key,
     required this.courseCode,
     required this.courseName,
     required this.courseLocalId,
-  });
+    DateTime? sessionDate,
+  }) : sessionDate = sessionDate ?? DateTime.now();
 
   @override
   State<WifiDirectHostScreen> createState() => _WifiDirectHostScreenState();
@@ -37,6 +45,9 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
   StreamSubscription<AttendanceMessage>? _sub;
   StreamSubscription<List<P2pClientInfo>>? _clientSub;
   int? _sessionLocalId;
+  Timer? _refreshTimer;
+  Timer? _countdownTimer;
+  int _secondsRemaining = 60;
 
   @override
   void initState() {
@@ -60,7 +71,11 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
         _payload = payload;
         _loading = false;
         _status = null;
+        _secondsRemaining = 60;
       });
+
+      // Start refresh timers
+      _startRefreshTimers();
 
       // Subscribe immediately; broadcast streams do not buffer events.
       _clientSub = _service.clientsStream.listen((clients) {
@@ -89,11 +104,13 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
           if (!mounted) return;
           final db = DatabaseProvider.of(context);
           final sid = _sessionLocalId;
+          print('💾 Persisting attendance for ${msg.studentName} (${msg.studentId}), session: $sid');
 
           final existing = await db.getUserByFirebaseUid(msg.studentId);
           int studentLocalId;
           if (existing != null) {
             studentLocalId = existing.id;
+            print('   Found existing student with ID: $studentLocalId');
           } else {
             studentLocalId = await db.upsertUser(
               UsersCompanion.insert(
@@ -107,10 +124,11 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
                 lastSyncedAt: const Value(null),
               ),
             );
+            print('   Created new student with ID: $studentLocalId');
           }
 
           if (sid != null) {
-            await db.markAttendance(
+            final attendanceId = await db.markAttendance(
               AttendanceRecordsCompanion.insert(
                 serverId: const Value(null),
                 sessionId: sid,
@@ -122,36 +140,74 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
                 synced: const Value(false),
               ),
             );
+            print('   ✅ Attendance record created with ID: $attendanceId');
+          } else {
+            print('   ⚠️ Session ID is null, cannot save attendance');
           }
-        } catch (_) {
-          // Ignore DB errors here; live UI already updated.
+        } catch (e) {
+          print('   ❌ Error saving attendance: $e');
         }
       });
 
-      // Create local session (after listeners are attached).
+      // Create session on server FIRST to get serverId immediately
       final db = DatabaseProvider.of(context);
-      final sessionId = await db.insertSession(
-        SessionsCompanion.insert(
-          serverId: const Value(null),
-          courseId: widget.courseLocalId,
-          sessionType: 'lecture',
-          startTime: DateTime.now(),
-          endTime: const Value(null),
-          location: const Value(null),
-          status: 'active',
-          synced: const Value(false),
-        ),
-      );
+      String? serverSessionId;
+      
+      try {
+        print('🔄 Creating session on server first...');
+        serverSessionId = await _createSessionOnServer();
+        print('✅ Got server session ID: $serverSessionId');
+      } catch (e) {
+        print('⚠️ Could not create session on server (will sync later): $e');
+        // Continue anyway - session will sync via sync queue
+      }
+
+      // Create local session - use direct insert to avoid duplicate sync queue when we have serverId
+      int sessionId;
+      if (serverSessionId != null) {
+        // Session already exists on server, insert directly without queueing sync
+        sessionId = await db.into(db.sessions).insert(
+          SessionsCompanion.insert(
+            serverId: Value(serverSessionId),
+            courseId: widget.courseLocalId,
+            sessionType: 'lecture',
+            startTime: DateTime.now(),
+            endTime: const Value(null),
+            location: const Value(null),
+            status: 'active',
+            synced: const Value(true), // Already synced!
+          ),
+        );
+      } else {
+        // No serverId, use normal insert which will queue sync
+        sessionId = await db.insertSession(
+          SessionsCompanion.insert(
+            serverId: const Value(null),
+            courseId: widget.courseLocalId,
+            sessionType: 'lecture',
+            startTime: DateTime.now(),
+            endTime: const Value(null),
+            location: const Value(null),
+            status: 'active',
+            synced: const Value(false),
+          ),
+        );
+      }
+      
       if (!mounted) return;
+      print('✅ Session created locally with ID: $sessionId, serverId: $serverSessionId');
       setState(() => _sessionLocalId = sessionId);
 
       // Flush any attendance received before session creation.
+      print('📝 Flushing ${_pendingPersist.length} pending attendance records');
       for (final msg in List<AttendanceMessage>.from(_pendingPersist)) {
         try {
+          print('   Processing pending: ${msg.studentName} (${msg.studentId})');
           final existing = await db.getUserByFirebaseUid(msg.studentId);
           int studentLocalId;
           if (existing != null) {
             studentLocalId = existing.id;
+            print('   Found existing student with ID: $studentLocalId');
           } else {
             studentLocalId = await db.upsertUser(
               UsersCompanion.insert(
@@ -165,9 +221,10 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
                 lastSyncedAt: const Value(null),
               ),
             );
+            print('   Created new student with ID: $studentLocalId');
           }
 
-          await db.markAttendance(
+          final attendanceId = await db.markAttendance(
             AttendanceRecordsCompanion.insert(
               serverId: const Value(null),
               sessionId: sessionId,
@@ -179,8 +236,9 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
               synced: const Value(false),
             ),
           );
-        } catch (_) {
-          // Ignore; this is best-effort.
+          print('   ✅ Pending attendance saved with ID: $attendanceId');
+        } catch (e) {
+          print('   ❌ Error flushing pending attendance: $e');
         }
       }
       _pendingPersist.clear();
@@ -193,8 +251,52 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
     }
   }
 
+  void _startRefreshTimers() {
+    // Refresh QR code every 60 seconds
+    _refreshTimer = Timer.periodic(const Duration(seconds: 60), (timer) {
+      _refreshPayload();
+    });
+
+    // Countdown timer updates every second
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() {
+        _secondsRemaining--;
+        if (_secondsRemaining <= 0) {
+          _secondsRemaining = 60;
+        }
+      });
+    });
+  }
+
+  Future<void> _refreshPayload() async {
+    try {
+      await _service.stopHostSession();
+      final newPayload = await _service.startHostSession(
+        courseCode: widget.courseCode,
+        courseName: widget.courseName,
+        onStatus: (s) {
+          if (!mounted) return;
+          setState(() => _status = s);
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _payload = newPayload;
+        _secondsRemaining = 60;
+      });
+    } catch (e) {
+      // Silently fail - keep old payload active
+    }
+  }
+
   @override
   void dispose() {
+    _refreshTimer?.cancel();
+    _countdownTimer?.cancel();
     _sub?.cancel();
     _clientSub?.cancel();
     _service.stopHostSession();
@@ -205,19 +307,16 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
   @override
   Widget build(BuildContext context) {
     final payload = _payload;
+    final displayDate = widget.sessionDate.millisecondsSinceEpoch > 0 
+        ? widget.sessionDate 
+        : DateTime.now();
+    
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('WiFi Direct Session'),
-      ),
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: _loading
-          ? Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const CircularProgressIndicator(),
-                  const SizedBox(height: 12),
-                  Text(_status ?? 'Starting host session...'),
-                ],
+          ? const Center(
+              child: CircularProgressIndicator(
+                valueColor: AlwaysStoppedAnimation<Color>(AppColors.primaryBlue),
               ),
             )
           : payload == null
@@ -227,100 +326,984 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Text('Could not start session'),
+                        const Icon(Icons.error_outline, size: 64, color: Colors.red),
+                        const SizedBox(height: 16),
+                        const Text(
+                          'Could not start session',
+                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        ),
                         const SizedBox(height: 12),
                         ElevatedButton.icon(
                           onPressed: _start,
                           icon: const Icon(Icons.refresh),
                           label: const Text('Retry'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppColors.primaryBlue,
+                            foregroundColor: AppColors.white,
+                          ),
                         ),
                       ],
                     ),
                   ),
                 )
-              : SingleChildScrollView(
-                  padding: const EdgeInsets.all(16),
+              : SafeArea(
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        '${widget.courseCode} · ${widget.courseName}',
-                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      // Blue Header with Course Info and LIVE indicator
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+                        decoration: const BoxDecoration(
+                          color: AppColors.primaryBlue,
+                          // borderRadius: BorderRadius.only(
+                          //   bottomLeft: Radius.circular(24),
+                          //   bottomRight: Radius.circular(24),
+                          // ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.center,
+                                    children: [
+                                      Text(
+                                        widget.courseCode,
+                                        style: const TextStyle(
+                                          color: AppColors.white,
+                                          fontSize: 28,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        DateFormat('MMM dd, yyyy').format(displayDate),
+                                        style: TextStyle(
+                                          color: AppColors.white.withOpacity(0.9),
+                                          fontSize: 16,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                  decoration: BoxDecoration(
+                                    color: Colors.red,
+                                    borderRadius: BorderRadius.circular(20),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: const [
+                                      Icon(Icons.circle, color: AppColors.white, size: 8),
+                                      SizedBox(width: 6),
+                                      Text(
+                                        'LIVE',
+                                        style: TextStyle(
+                                          color: AppColors.white,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
-                      const SizedBox(height: 12),
-                      Card(
-                        elevation: 2,
-                        child: Padding(
-                          padding: const EdgeInsets.all(16),
+
+                      // Main Content
+                      Expanded(
+                        child: SingleChildScrollView(
+                          padding: const EdgeInsets.all(20),
                           child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              QrImageView(
-                                data: payload.toEncodedString(),
-                                version: QrVersions.auto,
-                                size: 220,
+                              // QR Code Card
+                              Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(24),
+                                decoration: BoxDecoration(
+                                  color: Theme.of(context).cardColor,
+                                  borderRadius: BorderRadius.circular(20),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: AppColors.black.withOpacity(0.05),
+                                      blurRadius: 10,
+                                      offset: const Offset(0, 4),
+                                    ),
+                                  ],
+                                ),
+                                child: Column(
+                                  children: [
+                                    // QR Code
+                                    Container(
+                                      padding: const EdgeInsets.all(16),
+                                      decoration: BoxDecoration(
+                                        color: AppColors.white,
+                                        borderRadius: BorderRadius.circular(16),
+                                        border: Border.all(
+                                          color: AppColors.grey,
+                                          width: 2,
+                                        ),
+                                      ),
+                                      child: QrImageView(
+                                        data: payload.toEncodedString(),
+                                        version: QrVersions.auto,
+                                        size: 240,
+                                        backgroundColor: AppColors.white,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 20),
+                                    const Text(
+                                      'Scan to mark attendance',
+                                      style: TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w600,
+                                        color: AppColors.primaryBlue,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        const Icon(Icons.timer, size: 16, color: AppColors.grey),
+                                        const SizedBox(width: 6),
+                                        const Text(
+                                          'Code refreshes in ',
+                                          style: TextStyle(
+                                            fontSize: 14,
+                                            color: AppColors.grey,
+                                          ),
+                                        ),
+                                        Text(
+                                          '${_secondsRemaining}s',
+                                          style: TextStyle(
+                                            fontSize: 14,
+                                            color: AppColors.primaryBlue,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
                               ),
+
+                              const SizedBox(height: 24),
+
+                              // Students Joined Header
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(
+                                    'Students Joined (${_attendees.length})',
+                                    style: TextStyle(
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.bold,
+                                      color: Theme.of(context).textTheme.bodyLarge?.color,
+                                    ),
+                                  ),
+                                  if (_attendees.isNotEmpty)
+                                    TextButton(
+                                      onPressed: () {
+                                        // Navigate to full list
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (_) => _StudentListScreen(
+                                              courseCode: widget.courseCode,
+                                              attendees: _attendees,
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                      child: const Text('View All'),
+                                    ),
+                                ],
+                              ),
+
                               const SizedBox(height: 12),
-                              const Text(
-                                'Students: Scan this QR to join',
-                                style: TextStyle(fontWeight: FontWeight.w600),
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                'SSID: ${payload.ssid}\nPSK: ${payload.psk}',
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(color: Colors.grey),
-                              ),
+
+                              // Students List
+                              _attendees.isEmpty
+                                  ? Container(
+                                      width: double.infinity,
+                                      padding: const EdgeInsets.all(32),
+                                      decoration: BoxDecoration(
+                                        color: Theme.of(context).cardColor,
+                                        borderRadius: BorderRadius.circular(16),
+                                      ),
+                                      child: Column(
+                                        children: const [
+                                          Icon(
+                                            Icons.people_outline,
+                                            size: 64,
+                                            color: AppColors.grey,
+                                          ),
+                                          SizedBox(height: 12),
+                                          Text(
+                                            'No students have joined yet',
+                                            style: TextStyle(
+                                              fontSize: 16,
+                                              color: AppColors.grey,
+                                            ),
+                                          ),
+                                          SizedBox(height: 4),
+                                          Text(
+                                            'Waiting for students to scan...',
+                                            style: TextStyle(
+                                              fontSize: 14,
+                                              color: AppColors.grey,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    )
+                                  : FutureBuilder<List<Map<String, dynamic>>>(
+                                      future: _getStudentDetails(_attendees.take(3).toList()),
+                                      builder: (context, snapshot) {
+                                        if (!snapshot.hasData) {
+                                          return const Center(
+                                            child: Padding(
+                                              padding: EdgeInsets.all(16.0),
+                                              child: CircularProgressIndicator(),
+                                            ),
+                                          );
+                                        }
+
+                                        final students = snapshot.data!;
+                                        return ListView.builder(
+                                          physics: const NeverScrollableScrollPhysics(),
+                                          shrinkWrap: true,
+                                          itemCount: students.length,
+                                          itemBuilder: (context, index) {
+                                            final student = students[index];
+                                            final a = _attendees[index];
+                                            final initials = _getInitials(a.studentName);
+                                            final color = _getColorForIndex(index);
+                                            final matricNumber = student['matricNumber'] as String?;
+
+                                            return Container(
+                                              margin: const EdgeInsets.only(bottom: 12),
+                                              padding: const EdgeInsets.all(16),
+                                              decoration: BoxDecoration(
+                                                color: Theme.of(context).cardColor,
+                                                borderRadius: BorderRadius.circular(16),
+                                                boxShadow: [
+                                                  BoxShadow(
+                                                    color: AppColors.black.withOpacity(0.03),
+                                                    blurRadius: 8,
+                                                    offset: const Offset(0, 2),
+                                                  ),
+                                                ],
+                                              ),
+                                              child: Row(
+                                                children: [
+                                                  // Avatar
+                                                  Container(
+                                                    width: 50,
+                                                    height: 50,
+                                                    decoration: BoxDecoration(
+                                                      color: color.withOpacity(0.1),
+                                                      shape: BoxShape.circle,
+                                                    ),
+                                                    child: Center(
+                                                      child: Text(
+                                                        initials,
+                                                        style: TextStyle(
+                                                          color: color,
+                                                          fontSize: 18,
+                                                          fontWeight: FontWeight.bold,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 12),
+                                                  // Student Info
+                                                  Expanded(
+                                                    child: Column(
+                                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                                      children: [
+                                                        Text(
+                                                          a.studentName.isNotEmpty 
+                                                              ? a.studentName 
+                                                              : 'Student ${index + 1}',
+                                                          style: TextStyle(
+                                                            fontSize: 16,
+                                                            fontWeight: FontWeight.w600,
+                                                            color: Theme.of(context).textTheme.bodyLarge?.color,
+                                                          ),
+                                                        ),
+                                                        const SizedBox(height: 2),
+                                                        Text(
+                                                          matricNumber ?? 'Matric N/A',
+                                                          style: const TextStyle(
+                                                            fontSize: 14,
+                                                            color: AppColors.grey,
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                  // Timestamp
+                                                  Text(
+                                                    _formatTime(a.timestamp),
+                                                    style: const TextStyle(
+                                                      fontSize: 14,
+                                                      color: AppColors.grey,
+                                                      fontWeight: FontWeight.w500,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            );
+                                          },
+                                        );
+                                      },
+                                    ),
                             ],
                           ),
                         ),
                       ),
-                      const SizedBox(height: 16),
-                      Row(
-                        children: [
-                          Chip(label: Text('Session: ${payload.sessionId}')),
-                          const SizedBox(width: 8),
-                          Chip(label: Text('Attendees: ${_attendees.length}')),
-                          const SizedBox(width: 8),
-                          Chip(label: Text('Connected: ${_clients.length}')),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'Live Attendees',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 8),
-                      _attendees.isEmpty
-                          ? const Padding(
-                              padding: EdgeInsets.symmetric(vertical: 12),
-                              child: Text('No one has joined yet.'),
-                            )
-                          : ListView.separated(
-                              physics: const NeverScrollableScrollPhysics(),
-                              shrinkWrap: true,
-                              itemCount: _attendees.length,
-                              separatorBuilder: (_, __) => const Divider(height: 1),
-                              itemBuilder: (context, index) {
-                                final a = _attendees[index];
-                                return ListTile(
-                                  leading: const Icon(Icons.person_outline),
-                                  title: Text(a.studentName.isNotEmpty ? a.studentName : a.studentId),
-                                  subtitle: Text(
-                                    'ID: ${a.studentId} · ${_formatTime(a.timestamp)}',
-                                  ),
-                                );
-                              },
+
+                      // End Session Button
+                      Container(
+                        padding: const EdgeInsets.all(20),
+                        decoration: BoxDecoration(
+                          color: Theme.of(context).cardColor,
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppColors.black.withOpacity(0.05),
+                              blurRadius: 10,
+                              offset: const Offset(0, -2),
                             ),
+                          ],
+                        ),
+                        child: SizedBox(
+                          width: double.infinity,
+                          height: 56,
+                          child: ElevatedButton.icon(
+                            onPressed: () async {
+                              await _endSessionAndSync();
+                            },
+                            icon: const Icon(Icons.stop_circle, color: AppColors.white),
+                            label: const Text(
+                              'End Session',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                color: AppColors.white,
+                              ),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFD32F2F),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              elevation: 0,
+                            ),
+                          ),
+                        ),
+                      ),
                     ],
                   ),
                 ),
     );
   }
 
+  Future<void> _endSessionAndSync() async {
+    print('🔴 Starting _endSessionAndSync()');
+    
+    // Show loading dialog
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Syncing attendance to server...'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    try {
+      final db = DatabaseProvider.of(context);
+      
+      // End the session in database
+      if (_sessionLocalId != null) {
+        await db.updateSessionStatus(_sessionLocalId!, 'completed', DateTime.now());
+        print('✅ Session ended with ID: $_sessionLocalId');
+      }
+
+      // Sync to backend
+      print('🔄 Calling _syncSessionToBackend()...');
+      await _syncSessionToBackend();
+      print('✅ _syncSessionToBackend() completed');
+
+      if (!mounted) return;
+      Navigator.of(context).pop(); // Close loading dialog
+      Navigator.of(context).pop(); // Go back to dashboard
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('✅ Session ended and synced successfully'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e) {
+      print('❌ Error ending session: $e');
+      if (!mounted) return;
+      Navigator.of(context).pop(); // Close loading dialog
+      Navigator.of(context).pop(); // Go back to dashboard anyway
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Session ended. Sync failed: $e'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+    }
+  }
+
+  /// Create session on server and return the server session ID
+  Future<String> _createSessionOnServer() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      throw Exception('User not authenticated');
+    }
+
+    final idToken = await user.getIdToken();
+    if (idToken == null) {
+      throw Exception('Failed to get auth token');
+    }
+
+    const overrideUrl = String.fromEnvironment('BACKEND_URL');
+    final baseUrl = overrideUrl.isNotEmpty ? overrideUrl : 'https://att-back-0xvj.onrender.com';
+    final db = DatabaseProvider.of(context);
+
+    // Get course details
+    final course = await db.getCourseById(widget.courseLocalId);
+    if (course == null) {
+      throw Exception('Course not found');
+    }
+
+    // Resolve courseServerId
+    int? courseServerId;
+    if (course.serverId != null && course.serverId!.isNotEmpty) {
+      courseServerId = int.tryParse(course.serverId!);
+    } else {
+      // Fetch from server
+      final courseResponse = await http.get(
+        Uri.parse('$baseUrl/courses/my-courses'),
+        headers: {'Authorization': 'Bearer $idToken'},
+      ).timeout(const Duration(seconds: 10));
+      
+      if (courseResponse.statusCode == 200) {
+        final decoded = jsonDecode(courseResponse.body);
+        final coursesList = (decoded is List) ? decoded : (decoded is Map && decoded['data'] is List) ? decoded['data'] : [];
+        
+        for (final c in coursesList) {
+          if (c is Map) {
+            final backendCode = c['code'] ?? c['course_code'];
+            if (backendCode == course.code) {
+              courseServerId = c['id'] as int?;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (courseServerId == null) {
+      throw Exception('Course not found on server');
+    }
+
+    // Create session on server
+    final sessionPayload = {
+      'course_id': courseServerId,
+      'session_type': 'lecture',
+      'start_time': DateTime.now().toIso8601String(),
+      'location': 'Lecture Hall',
+      'status': 'active',
+    };
+
+    final sessionResponse = await http.post(
+      Uri.parse('$baseUrl/sessions/create'),
+      headers: {
+        'Authorization': 'Bearer $idToken',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(sessionPayload),
+    ).timeout(const Duration(seconds: 30));
+
+    if (sessionResponse.statusCode != 200 && sessionResponse.statusCode != 201) {
+      throw Exception('Session creation failed: ${sessionResponse.statusCode}');
+    }
+
+    final sessionData = jsonDecode(sessionResponse.body);
+    final serverSessionId = sessionData['id'] ?? sessionData['session_id'];
+    
+    if (serverSessionId == null) {
+      throw Exception('No session ID in response');
+    }
+
+    return serverSessionId.toString();
+  }
+
+  Future<void> _syncSessionToBackend() async {
+    print('🟦 _syncSessionToBackend() started');
+    
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        print('❌ User not authenticated');
+        throw Exception('User not authenticated');
+      }
+
+      final idToken = await user.getIdToken();
+      if (idToken == null) {
+        print('❌ Failed to get auth token');
+        throw Exception('Failed to get auth token');
+      }
+
+      const overrideUrl = String.fromEnvironment('BACKEND_URL');
+      final baseUrl = overrideUrl.isNotEmpty ? overrideUrl : 'https://att-back-0xvj.onrender.com';
+
+      final db = DatabaseProvider.of(context);
+      
+      if (_sessionLocalId == null) {
+        print('❌ _sessionLocalId is null');
+        throw Exception('Session ID is null');
+      }
+
+      // Get session details
+      final session = await db.getSessionById(_sessionLocalId!);
+      if (session == null) {
+        print('❌ Session not found in database');
+        throw Exception('Session not found');
+      }
+      print('📋 Found session: id=${session.id}, courseId=${session.courseId}, type=${session.sessionType}');
+
+      final course = await db.getCourseById(session.courseId);
+      if (course == null) {
+        print('❌ Course not found in database');
+        throw Exception('Course not found');
+      }
+      print('📚 Found course: id=${course.id}, code=${course.code}, serverId=${course.serverId}');
+
+      // Resolve course.serverId if missing
+      int? courseServerId;
+      if (course.serverId != null && course.serverId!.isNotEmpty) {
+        courseServerId = int.tryParse(course.serverId!);
+        print('✅ Using cached serverId: $courseServerId');
+      } else {
+        print('🔍 Fetching course serverId from backend...');
+        try {
+          final courseResponse = await http.get(
+            Uri.parse('$baseUrl/courses/my-courses'),
+            headers: {'Authorization': 'Bearer $idToken'},
+          ).timeout(const Duration(seconds: 10));
+          
+          print('📡 Course list response: ${courseResponse.statusCode}');
+          if (courseResponse.statusCode == 200) {
+            final decoded = jsonDecode(courseResponse.body);
+            print('📦 Decoded response: $decoded');
+            
+            final coursesList = (decoded is List) ? decoded : (decoded is Map && decoded['data'] is List) ? decoded['data'] : [];
+            print('📋 Found ${coursesList.length} courses on backend');
+            
+            for (final c in coursesList) {
+              if (c is Map) {
+                final backendCode = c['code'] ?? c['course_code'];
+                print('   Checking: backend=$backendCode vs local=${course.code}');
+                if (backendCode == course.code) {
+                  courseServerId = c['id'] as int?;
+                  print('✅ Matched! serverId=$courseServerId');
+                  break;
+                }
+              }
+            }
+          }
+        } catch (e) {
+          print('⚠️ Error fetching courses: $e');
+        }
+      }
+
+      if (courseServerId == null) {
+        print('❌ Could not resolve courseServerId');
+        throw Exception('Course serverId not found. Create course on backend first.');
+      }
+
+      // Get attendance records
+      final attendanceRecords = await db.getAttendanceBySessionId(_sessionLocalId!);
+      print('👥 Found ${attendanceRecords.length} attendance records');
+
+      // Check if session already has a serverId (created during QR code generation)
+      String serverSessionId;
+      if (session.serverId != null && session.serverId!.isNotEmpty) {
+        serverSessionId = session.serverId!;
+        print('✅ Session already has serverId: $serverSessionId (skipping creation)');
+        
+        // Update session status to completed on server
+        try {
+          await http.patch(
+            Uri.parse('$baseUrl/sessions/$serverSessionId'),
+            headers: {
+              'Authorization': 'Bearer $idToken',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({
+              'end_time': session.endTime?.toIso8601String() ?? DateTime.now().toIso8601String(),
+              'status': 'completed',
+            }),
+          ).timeout(const Duration(seconds: 10));
+          print('✅ Updated session status to completed');
+        } catch (e) {
+          print('⚠️ Could not update session status: $e');
+        }
+      } else {
+        // Create session on backend (fallback for offline sessions)
+        print('📤 POSTing session to /sessions/create...');
+        final sessionPayload = {
+          'course_id': courseServerId,
+          'session_type': session.sessionType,
+          'start_time': session.startTime.toIso8601String(),
+          'end_time': session.endTime?.toIso8601String() ?? DateTime.now().toIso8601String(),
+          'location': session.location ?? 'Lecture Hall',
+          'status': 'completed',
+        };
+        print('📦 Payload: $sessionPayload');
+
+        final sessionResponse = await http.post(
+          Uri.parse('$baseUrl/sessions/create'),
+          headers: {
+            'Authorization': 'Bearer $idToken',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode(sessionPayload),
+        ).timeout(const Duration(seconds: 30));
+
+        print('🔄 Session response status: ${sessionResponse.statusCode}');
+        print('📄 Session response body: ${sessionResponse.body}');
+
+        if (sessionResponse.statusCode != 200 && sessionResponse.statusCode != 201) {
+          print('❌ Session sync failed');
+          throw Exception('Session creation failed: ${sessionResponse.statusCode}');
+        }
+
+        final sessionData = jsonDecode(sessionResponse.body);
+        final tempServerSessionId = sessionData['id'] ?? sessionData['session_id'];
+        print('✅ Got serverSessionId: $tempServerSessionId');
+
+        if (tempServerSessionId == null) {
+          print('❌ No session ID in response');
+          throw Exception('Backend did not return session ID');
+        }
+
+        serverSessionId = tempServerSessionId.toString();
+        
+        // Update local session with server ID
+        await db.updateSessionServerId(_sessionLocalId!, serverSessionId);
+        print('✅ Updated local session ${_sessionLocalId!} with serverId: $serverSessionId');
+      }
+
+      // Sync attendance records
+      print('👥 Syncing ${attendanceRecords.length} attendance records...');
+      for (final record in attendanceRecords) {
+        try {
+          final student = await db.getUserById(record.studentId);
+          if (student == null) {
+            print('   ⚠️ Student not found for record ${record.id}');
+            continue;
+          }
+
+          final payload = {
+            'session_id': serverSessionId,
+            'student_firebase_uid': student.firebaseUid,
+            'status': record.status,
+            'timestamp': record.markedAt.toIso8601String(),
+            'verified': record.faceVerified,
+          };
+
+          print('   📤 Syncing attendance for ${student.name}...');
+          final attendanceResponse = await http.post(
+            Uri.parse('$baseUrl/attendance/mark'),
+            headers: {
+              'Authorization': 'Bearer $idToken',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode(payload),
+          ).timeout(const Duration(seconds: 10));
+
+          print('   🔄 Response: ${attendanceResponse.statusCode}');
+          if (attendanceResponse.statusCode == 200 || attendanceResponse.statusCode == 201) {
+            // ✅ FIX: Update attendance with server ID
+            try {
+              final attendanceData = jsonDecode(attendanceResponse.body);
+              final serverAttendanceId = attendanceData['attendance_id']?.toString() ?? attendanceData['id']?.toString();
+              if (serverAttendanceId != null) {
+                await db.updateAttendanceServerId(record.id, serverAttendanceId);
+                print('   ✅ Synced with serverId: $serverAttendanceId');
+              } else {
+                await db.markAttendanceSynced(record.id);
+                print('   ✅ Synced (no serverId in response)');
+              }
+            } catch (e) {
+              await db.markAttendanceSynced(record.id);
+              print('   ✅ Synced (could not parse response: $e)');
+            }
+          } else {
+            print('   ❌ Failed: ${attendanceResponse.body}');
+          }
+        } catch (e) {
+          print('   ❌ Error: $e');
+        }
+      }
+
+      print('✅ _syncSessionToBackend() completed successfully');
+    } catch (e) {
+      print('❌ _syncSessionToBackend() failed: $e');
+      rethrow;
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _getStudentDetails(List<AttendanceMessage> attendees) async {
+    final db = DatabaseProvider.of(context);
+    final results = <Map<String, dynamic>>[];
+
+    for (final attendee in attendees) {
+      final user = await db.getUserByFirebaseUid(attendee.studentId);
+      results.add({
+        'matricNumber': user?.externalId,
+        'studentId': attendee.studentId,
+      });
+    }
+
+    return results;
+  }
+
+  String _getInitials(String name) {
+    if (name.isEmpty) return '?';
+    final parts = name.split(' ');
+    if (parts.length >= 2) {
+      return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
+    }
+    return name.substring(0, name.length > 1 ? 2 : 1).toUpperCase();
+  }
+
+  Color _getColorForIndex(int index) {
+    final colors = [
+      const Color(0xFF0D47A1),
+      const Color(0xFF7B1FA2),
+      const Color(0xFF00ACC1),
+      const Color(0xFFFF6F00),
+      const Color(0xFFD32F2F),
+      const Color(0xFF388E3C),
+    ];
+    return colors[index % colors.length];
+  }
+
   String _formatTime(DateTime dt) {
-    final d = dt.toLocal();
-    String two(int n) => n.toString().padLeft(2, '0');
-    return '${two(d.hour)}:${two(d.minute)}:${two(d.second)}';
+    return DateFormat('h:mm a').format(dt.toLocal());
+  }
+}
+
+// Full Student List Screen
+class _StudentListScreen extends StatelessWidget {
+  final String courseCode;
+  final List<AttendanceMessage> attendees;
+
+  const _StudentListScreen({
+    required this.courseCode,
+    required this.attendees,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      appBar: AppBar(
+        title: Text('Students Joined (${attendees.length})'),
+        backgroundColor: AppColors.primaryBlue,
+        foregroundColor: AppColors.white,
+        elevation: 0,
+      ),
+      body: Column(
+        children: [
+          // Search Bar
+          Container(
+            color: Theme.of(context).cardColor,
+            padding: const EdgeInsets.all(16),
+            child: TextField(
+              decoration: InputDecoration(
+                hintText: 'Search name or matric no...',
+                prefixIcon: const Icon(Icons.search, color: AppColors.grey),
+                filled: true,
+                fillColor: Theme.of(context).brightness == Brightness.dark
+                    ? Colors.grey.shade800
+                    : AppColors.background,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
+                contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 16),
+              ),
+            ),
+          ),
+
+          // Student List
+          Expanded(
+            child: FutureBuilder<List<Map<String, dynamic>>>(
+              future: _getStudentDetails(context, attendees),
+              builder: (context, snapshot) {
+                if (!snapshot.hasData) {
+                  return const Center(
+                    child: CircularProgressIndicator(),
+                  );
+                }
+
+                final students = snapshot.data!;
+                return ListView.builder(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: attendees.length,
+                  itemBuilder: (context, index) {
+                    final a = attendees[index];
+                    final student = students[index];
+                    final initials = _getInitials(a.studentName);
+                    final color = _getColorForIndex(index);
+                    final matricNumber = student['matricNumber'] as String?;
+
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).cardColor,
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppColors.black.withOpacity(0.03),
+                            blurRadius: 8,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        children: [
+                          // Avatar
+                          Container(
+                            width: 50,
+                            height: 50,
+                            decoration: BoxDecoration(
+                              color: color.withOpacity(0.1),
+                              shape: BoxShape.circle,
+                            ),
+                            child: Center(
+                              child: Text(
+                                initials,
+                                style: TextStyle(
+                                  color: color,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          // Student Info
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  a.studentName.isNotEmpty 
+                                      ? a.studentName 
+                                      : 'Student ${index + 1}',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w600,
+                                    color: Theme.of(context).textTheme.bodyLarge?.color,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  matricNumber ?? 'Matric N/A',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: AppColors.grey,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          // Timestamp
+                          Text(
+                            DateFormat('h:mm a').format(a.timestamp.toLocal()),
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: AppColors.grey,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> _getStudentDetails(BuildContext context, List<AttendanceMessage> attendees) async {
+    final db = DatabaseProvider.of(context);
+    final results = <Map<String, dynamic>>[];
+
+    for (final attendee in attendees) {
+      final user = await db.getUserByFirebaseUid(attendee.studentId);
+      results.add({
+        'matricNumber': user?.externalId,
+        'studentId': attendee.studentId,
+      });
+    }
+
+    return results;
+  }
+
+  String _getInitials(String name) {
+    if (name.isEmpty) return '?';
+    final parts = name.split(' ');
+    if (parts.length >= 2) {
+      return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
+    }
+    return name.substring(0, name.length > 1 ? 2 : 1).toUpperCase();
+  }
+
+  Color _getColorForIndex(int index) {
+    final colors = [
+      const Color(0xFF0D47A1),
+      const Color(0xFF7B1FA2),
+      const Color(0xFF00ACC1),
+      const Color(0xFFFF6F00),
+      const Color(0xFFD32F2F),
+      const Color(0xFF388E3C),
+    ];
+    return colors[index % colors.length];
   }
 }

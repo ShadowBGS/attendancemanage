@@ -129,76 +129,176 @@ class _SessionAttendanceScreenState extends State<SessionAttendanceScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Attendance'),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              '${widget.courseCode} · ${widget.courseName}',
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Text(
-                  'Session ${widget.sessionServerId}',
-                  style: const TextStyle(color: Colors.grey),
-                ),
-                const Spacer(),
-                IconButton(
-                  onPressed: _loading ? null : _refreshFromBackend,
-                  icon: _loading
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.refresh),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Expanded(
-              child: _rows.isEmpty
-                  ? const Center(child: Text('No attendance records yet'))
-                  : ListView.separated(
-                      itemCount: _rows.length,
-                      separatorBuilder: (_, __) => const Divider(height: 1),
-                      itemBuilder: (context, index) {
-                        final row = _rows[index];
-                        final status = row.record.status;
-                        final subtitleBits = <String>[];
-                        if (row.student.externalId != null && row.student.externalId!.isNotEmpty) {
-                          subtitleBits.add(row.student.externalId!);
-                        }
-                        if (row.student.email.isNotEmpty) subtitleBits.add(row.student.email);
+    const Color primaryBlue = Color(0xFF0D47A1);
 
-                        return ListTile(
-                          leading: CircleAvatar(
-                            backgroundColor: Colors.green.withOpacity(0.1),
-                            child: const Icon(Icons.person, color: Colors.green),
-                          ),
-                          title: Text(row.student.name),
-                          subtitle: Text(subtitleBits.isNotEmpty ? subtitleBits.join(' · ') : 'Student'),
-                          trailing: Text(
-                            status,
-                            style: TextStyle(
-                              fontWeight: FontWeight.w600,
-                              color: status == 'present' ? Colors.green : Colors.orange,
-                            ),
-                          ),
-                        );
-                      },
-                    ),
+    return Scaffold(
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      appBar: AppBar(
+        title: Text('Students Joined (${_rows.length})'),
+        backgroundColor: primaryBlue,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.more_vert),
+            onPressed: () {},
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          // Search Bar
+          Container(
+            color: Theme.of(context).cardColor,
+            padding: const EdgeInsets.all(16),
+            child: TextField(
+              decoration: InputDecoration(
+                hintText: 'Search name or matric no...',
+                prefixIcon: const Icon(Icons.search, color: Colors.grey),
+                filled: true,
+                fillColor: Theme.of(context).brightness == Brightness.dark
+                    ? Colors.grey.shade800
+                    : const Color(0xFFF5F5F5),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
+                contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 16),
+              ),
             ),
-          ],
-        ),
+          ),
+
+          // Student List
+          Expanded(
+            child: RefreshIndicator(
+              onRefresh: _refreshFromBackend,
+              child: _rows.isEmpty
+                  ? ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      children: const [
+                        SizedBox(height: 200),
+                        Center(child: Text('No attendance records yet')),
+                      ],
+                    )
+                  : ListView.builder(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.all(16),
+                    itemCount: _rows.length,
+                    itemBuilder: (context, index) {
+                      final row = _rows[index];
+                      final initials = _getInitials(row.student.name);
+                      final color = _getColorForIndex(index);
+                      final matricNumber = row.student.externalId;
+                      final program = row.student.department ?? 'Computer Science';
+
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 12),
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Theme.of(context).cardColor,
+                          borderRadius: BorderRadius.circular(16),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.03),
+                              blurRadius: 8,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          children: [
+                            // Avatar
+                            Container(
+                              width: 50,
+                              height: 50,
+                              decoration: BoxDecoration(
+                                color: color.withOpacity(0.1),
+                                shape: BoxShape.circle,
+                              ),
+                              child: Center(
+                                child: Text(
+                                  initials,
+                                  style: TextStyle(
+                                    color: color,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            // Student Info
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    row.student.name,
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                      color: Theme.of(context).textTheme.bodyLarge?.color,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    matricNumber != null && matricNumber.isNotEmpty
+                                        ? '$matricNumber · $program'
+                                        : program,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: Colors.grey[600],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            // Timestamp
+                            Text(
+                              _formatTime(row.record.markedAt),
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: Theme.of(context).textTheme.bodyLarge?.color,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+            ),
+          ),
+        ],
       ),
     );
+  }
+
+  String _getInitials(String name) {
+    if (name.isEmpty) return '?';
+    final parts = name.split(' ');
+    if (parts.length >= 2) {
+      return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
+    }
+    return name.substring(0, name.length > 1 ? 2 : 1).toUpperCase();
+  }
+
+  Color _getColorForIndex(int index) {
+    final colors = [
+      const Color(0xFF0D47A1),
+      const Color(0xFF7B1FA2),
+      const Color(0xFF00ACC1),
+      const Color(0xFFFF6F00),
+      const Color(0xFFD32F2F),
+      const Color(0xFF388E3C),
+    ];
+    return colors[index % colors.length];
+  }
+
+  String _formatTime(DateTime dt) {
+    final hour = dt.hour > 12 ? dt.hour - 12 : (dt.hour == 0 ? 12 : dt.hour);
+    final minute = dt.minute.toString().padLeft(2, '0');
+    final period = dt.hour >= 12 ? 'PM' : 'AM';
+    return '$hour:$minute $period';
   }
 }

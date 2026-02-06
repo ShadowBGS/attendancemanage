@@ -54,19 +54,40 @@ class SyncService {
       _isSyncing = true;
 
       final user = FirebaseAuth.instance.currentUser;
-      if (user == null) return;
+      if (user == null) {
+        // Silently skip sync when not authenticated
+        return;
+      }
 
       final idToken = await user.getIdToken();
-      if (idToken == null) return;
+      if (idToken == null) {
+        print('❌ Sync: No ID token available');
+        return;
+      }
 
       final pending = await database.getPendingSyncItems();
+      print('📤 Sync: Found ${pending.length} pending items');
+      
       if (pending.isEmpty) return;
+
+      // Log sync queue status for debugging
+      print('📤 Sync Queue Status:');
+      for (final item in pending) {
+        final payload = jsonDecode(item.payload);
+        print('  - ${item.entityType} #${item.id}: ${item.operation}, retry=${item.retryCount}');
+        if (item.entityType == 'attendance') {
+          print('    session_id=${payload['session_id']}, student=${payload['student_firebase_uid']}');
+        }
+      }
 
       for (final item in pending) {
         try {
+          print('🔄 Sync: Processing ${item.entityType} (ID: ${item.id})');
           await _syncItem(item, idToken);
           await database.markSyncComplete(item.id);
+          print('✅ Sync: Completed ${item.entityType} (ID: ${item.id})');
         } catch (e) {
+          print('❌ Sync Error for item ${item.id}: $e');
           // Increment retry count and log error
           await database.incrementSyncRetry(item.id, e.toString());
         }
@@ -76,8 +97,11 @@ class SyncService {
       try {
         await pullLatestData(idToken);
       } catch (e) {
+        print('⚠️ Sync: Pull latest data failed: $e');
         // Ignore pull errors; will retry later
       }
+    } catch (e) {
+      print('❌ Sync Critical Error: $e');
     } finally {
       _isSyncing = false;
     }
@@ -124,11 +148,40 @@ class SyncService {
         'Failed to sync session: ${response.statusCode} ${response.body}',
       );
     }
+
+    // ✅ FIX: Extract server ID from response and update local record
+    try {
+      final responseData = jsonDecode(response.body) as Map<String, dynamic>;
+      final ops = responseData['ops'] as List?;
+      if (ops != null && ops.isNotEmpty) {
+        final firstOp = ops[0] as Map<String, dynamic>;
+        final serverSessionId = firstOp['entity_id']?.toString();
+        
+        if (serverSessionId != null && serverSessionId.isNotEmpty && item.entityLocalId > 0) {
+          await database.updateSessionServerId(item.entityLocalId, serverSessionId);
+          print('   ✅ Updated local session ${item.entityLocalId} with serverId: $serverSessionId');
+        }
+      }
+    } catch (e) {
+      print('   ⚠️ Could not extract session_id from response: $e');
+    }
   }
 
-  /// Sync attendance record to /sync/push endpoint
+  /// Sync attendance record via /sync/push endpoint (same as sessions)
   Future<void> _syncAttendance(SyncQueueData item, String idToken) async {
     final payload = jsonDecode(item.payload);
+    
+    // ✅ Check if session has server ID before attempting sync
+    final sessionId = payload['session_id'];
+    if (sessionId == null || sessionId.toString().isEmpty) {
+      print('   ⏭️ Session not synced yet (session_id is null) - deferring attendance sync');
+      throw Exception('Session not synced yet - deferring attendance sync');
+    }
+    
+    print('   📤 Syncing attendance via /sync/push...');
+    print('   📦 Payload: $payload');
+    
+    // Use /sync/push endpoint (same as sessions)
     final response = await http.post(
       Uri.parse(baseUrl).resolve('/sync/push'),
       headers: {
@@ -141,17 +194,42 @@ class SyncService {
             'op_id': 'attendance_${item.id}',
             'entity': 'attendance',
             'op': item.operation,
-            'entity_id': payload['serverId'] ?? '',
+            'entity_id': sessionId.toString(),
             'payload': payload,
           }
         ]
       }),
-    );
+    ).timeout(const Duration(seconds: 10));
+
+    print('   🔄 Response: ${response.statusCode} - ${response.body}');
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception(
         'Failed to sync attendance: ${response.statusCode} ${response.body}',
       );
+    }
+
+    // ✅ Extract result from sync/push response
+    try {
+      final responseData = jsonDecode(response.body) as Map<String, dynamic>;
+      final results = responseData['results'] as List?;
+      if (results != null && results.isNotEmpty) {
+        final firstResult = results[0] as Map<String, dynamic>;
+        final ok = firstResult['ok'] as bool?;
+        
+        if (ok == true) {
+          // Backend doesn't return attendance_id in sync/push, just mark as synced
+          await database.markAttendanceSynced(item.entityLocalId);
+          print('   ✅ Attendance synced successfully');
+        } else {
+          final error = firstResult['error']?.toString() ?? 'Unknown error';
+          throw Exception('Backend rejected attendance: $error');
+        }
+      }
+    } catch (e) {
+      print('   ⚠️ Could not process sync response: $e');
+      // Rethrow if it's our exception
+      if (e.toString().contains('Backend rejected')) rethrow;
     }
   }
 
@@ -326,6 +404,25 @@ class SyncService {
               final markedAt = DateTime.tryParse(map['timestamp']?.toString() ?? '') ?? DateTime.now();
               final status = map['status']?.toString() ?? 'present';
               final verified = map['verified'] as bool? ?? false;
+
+              // ✅ FIX: Check for existing attendance by student+session to prevent duplicates
+              final existingByStudentSession = await database.getAttendanceByStudentAndSession(
+                studentLocalId,
+                session.id,
+              );
+              
+              if (existingByStudentSession != null) {
+                // Update existing record with server data
+                await database.updateAttendanceFromServer(
+                  existingByStudentSession.id,
+                  attendanceId,
+                  status,
+                  markedAt,
+                  verified,
+                );
+                print('   🔄 Updated existing attendance record ${existingByStudentSession.id}');
+                continue;
+              }
 
               await database.upsertAttendanceFromServer(
                 serverId: attendanceId,

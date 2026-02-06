@@ -1,44 +1,20 @@
 import 'package:flutter/material.dart';
 
-class NotificationsScreen extends StatelessWidget {
+class NotificationsScreen extends StatefulWidget {
   const NotificationsScreen({super.key});
 
   @override
+  State<NotificationsScreen> createState() => _NotificationsScreenState();
+}
+
+class _NotificationsScreenState extends State<NotificationsScreen> {
+  @override
   Widget build(BuildContext context) {
-    // Mock notification data
-    final notifications = [
-      _NotificationItem(
-        icon: Icons.school,
-        title: 'New Session Started',
-        subtitle: 'CS101 - Intro to Computing',
-        time: '5 min ago',
-        isRead: false,
-        color: Colors.blue,
-      ),
-      _NotificationItem(
-        icon: Icons.assignment_turned_in,
-        title: 'Attendance Marked',
-        subtitle: 'Your attendance for MTH202 has been recorded',
-        time: '2 hours ago',
-        isRead: false,
-        color: Colors.green,
-      ),
-      _NotificationItem(
-        icon: Icons.warning_amber_rounded,
-        title: 'Low Attendance Warning',
-        subtitle: 'Your attendance in PHY101 is below 75%',
-        time: '1 day ago',
-        isRead: true,
-        color: Colors.orange,
-      ),
-      _NotificationItem(
-        icon: Icons.event,
-        title: 'Upcoming Session',
-        subtitle: 'CS101 lecture tomorrow at 9:00 AM',
-        time: '2 days ago',
-        isRead: true,
-        color: Colors.purple,
-      ),
+    // TODO: Load from database/backend in future
+    // For now showing placeholder message
+    final notifications = <_NotificationItem>[
+      // Empty list - will be populated from backend
+      // Notifications will be loaded from backend in future updates
     ];
 
     return Scaffold(

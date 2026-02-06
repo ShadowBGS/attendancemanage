@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../widgets/role_card.dart';
 import 'auth_screen.dart';
+import '../theme/app_colors.dart';
 
 class RoleSelectionPage extends StatefulWidget {
   const RoleSelectionPage({super.key});
@@ -16,10 +17,10 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> {
   Widget build(BuildContext context) {
     final Color accentColor = selectedRole == 'student'
         ? const Color(0xFF673AB7)
-        : Colors.blue;
+        : AppColors.primaryBlue;
 
     return Scaffold(
-      backgroundColor: Colors.grey[100],
+      backgroundColor: Colors.white,
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(24),
@@ -44,6 +45,7 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> {
                         style: TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.bold,
+                          color: Colors.black,
                         ),
                       ),
                       const SizedBox(height: 16),
@@ -52,10 +54,10 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> {
                       RoleCard(
                         icon: Icons.school,
                         title: 'Lecturer',
-                        subtitle: 'Start class sessions and manage attendance',
+                        subtitle: 'Start class sessions and\n manage attendance',
                         iconBackground: selectedRole == 'lecturer'
                             ? accentColor
-                            : Colors.grey,
+                            : AppColors.grey,
                         highlightColor: accentColor,
                         isSelected: selectedRole == 'lecturer',
                         onTap: () => setState(() => selectedRole = 'lecturer'),
@@ -66,7 +68,7 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> {
                         subtitle: 'Scan QR codes and mark attendance',
                         iconBackground: selectedRole == 'student'
                             ? accentColor
-                            : Colors.grey,
+                            : AppColors.grey,
                         highlightColor: accentColor,
                         isSelected: selectedRole == 'student',
                         onTap: () => setState(() => selectedRole = 'student'),
@@ -108,7 +110,7 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> {
                   child: Text(
                     'Continue as ${selectedRole[0].toUpperCase()}${selectedRole.substring(1)}',
                     style: const TextStyle(
-                      color: Colors.white,
+                      color: AppColors.white,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
@@ -127,20 +129,20 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        const Column(
+        Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
+            const Text(
               'Smart Attendance',
-              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.black),
             ),
-            Text('Offline-First System', style: TextStyle(color: Colors.grey)),
+            Text('Offline-First System', style: TextStyle(color: Colors.grey[600])),
           ],
         ),
         Container(
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(color: accentColor, shape: BoxShape.circle),
-          child: const Icon(Icons.wifi_off, color: Colors.white, size: 24),
+          child: const Icon(Icons.wifi_off, color: AppColors.white, size: 24),
         ),
       ],
     );
@@ -151,11 +153,11 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> {
       width: double.infinity,
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: AppColors.white,
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
+            color: AppColors.black.withOpacity(0.05),
             blurRadius: 10,
             offset: const Offset(0, 4),
           ),
@@ -167,12 +169,12 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> {
           const SizedBox(height: 12),
           const Text(
             'Ready to Connect',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.black),
           ),
           const SizedBox(height: 4),
-          const Text(
+          Text(
             'Use Wi-Fi Direct for seamless tracking',
-            style: TextStyle(color: Colors.grey),
+            style: TextStyle(color: Colors.grey[600]),
             textAlign: TextAlign.center,
           ),
         ],
