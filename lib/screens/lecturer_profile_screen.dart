@@ -7,8 +7,6 @@ import 'package:url_launcher/url_launcher.dart';
 import '../main.dart' show appThemeMode;
 import '../theme/app_colors.dart';
 import '../db/database_provider.dart';
-import 'lecturer_courses_screen.dart';
-import 'lecturer_dashboard.dart';
 import 'edit_profile_screen.dart';
 
 class LecturerProfileScreen extends StatefulWidget {
@@ -19,13 +17,11 @@ class LecturerProfileScreen extends StatefulWidget {
 }
 
 class _LecturerProfileScreenState extends State<LecturerProfileScreen> {
-  static const Color _primaryBlue = Color(0xFF0D47A1);
-  
-  String _fullName = '';
-  String _staffId = '';
-  String _department = '';
-  String _title = '';
   String _email = '';
+  String _fullName = '';
+  String _staffId = 'N/A';
+  String _department = 'N/A';
+  String _title = 'Dr.';
   
   bool _notificationsEnabled = false;
   bool _isLoading = true;

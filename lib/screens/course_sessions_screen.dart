@@ -6,9 +6,9 @@ import 'package:http/http.dart' as http;
 
 import '../db/database.dart';
 import '../db/database_provider.dart';
-import '../models/wifi_direct_payload.dart';
+//import '../models/wifi_direct_payload.dart';
 import 'session_attendance_screen.dart';
-import 'lecturer_session_detail_screen.dart';
+//import 'lecturer_session_detail_screen.dart';
 
 class CourseSessionsScreen extends StatefulWidget {
   final int courseLocalId;
@@ -257,7 +257,6 @@ class _CourseSessionsScreenState extends State<CourseSessionsScreen> {
                       itemCount: _filteredSessions.length,
                       itemBuilder: (context, index) {
                         final s = _filteredSessions[index];
-                        final isActive = s.status == 'active';
 
                         return GestureDetector(
                           onTap: s.serverId == null
@@ -283,7 +282,7 @@ class _CourseSessionsScreenState extends State<CourseSessionsScreen> {
                               borderRadius: BorderRadius.circular(16),
                               boxShadow: [
                                 BoxShadow(
-                                  color: Colors.black.withOpacity(0.04),
+                                  color: Colors.black.withValues(alpha: 0.04),
                                   blurRadius: 10,
                                   offset: const Offset(0, 4),
                                 ),
@@ -296,7 +295,7 @@ class _CourseSessionsScreenState extends State<CourseSessionsScreen> {
                                   width: 56,
                                   height: 56,
                                   decoration: BoxDecoration(
-                                    color: primaryBlue.withOpacity(0.1),
+                                    color: primaryBlue.withValues(alpha: 0.1),
                                     borderRadius: BorderRadius.circular(12),
                                   ),
                                   child: Icon(

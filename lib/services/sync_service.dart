@@ -310,7 +310,7 @@ class SyncService {
               if (course == null) continue;
 
               final startTime = DateTime.tryParse(map['start_time']?.toString() ?? '') ?? DateTime.now();
-              final endTime = map['end_time'] != null ? DateTime.tryParse(map['end_time'].toString() ?? '') : null;
+              final endTime = map['end_time'] != null ? DateTime.tryParse(map['end_time'].toString()) : null;
               final status = map['status']?.toString() ?? 'active';
 
               await database.upsertSessionFromServer(

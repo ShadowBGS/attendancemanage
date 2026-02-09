@@ -171,7 +171,13 @@ class _DashboardSelectorState extends State<DashboardSelector> {
         headers: {
           'Authorization': 'Bearer $idToken',
         },
-      ).timeout(const Duration(seconds: 10)); // Add timeout for offline scenarios
+      ).timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          print('⏱️ Profile fetch timed out after 30s (backend may be cold-starting)');
+          throw Exception('Backend timeout - server may be waking up');
+        },
+      );
 
       print('📡 Profile response: ${response.statusCode}');
       if (response.statusCode == 200) {

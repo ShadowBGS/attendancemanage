@@ -1,5 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:http/http.dart' as http;
+import 'package:drift/drift.dart' show Value;
 import '../db/database_provider.dart';
 import '../db/database.dart';
 import '../theme/app_colors.dart';
@@ -22,13 +26,21 @@ class _StudentCourseDetailScreenState extends State<StudentCourseDetailScreen> {
   double _attendancePercentage = 0.0;
   bool _isLoading = true;
   bool _didLoadInitialData = false;
+  bool _isInitialLoadDone = false;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (!_didLoadInitialData) {
       _didLoadInitialData = true;
-      _loadCourseData();
+      _performInitialLoad();
+    }
+  }
+
+  Future<void> _performInitialLoad() async {
+    await _loadCourseData();
+    if (mounted) {
+      setState(() => _isInitialLoadDone = true);
     }
   }
 
@@ -51,7 +63,10 @@ class _StudentCourseDetailScreenState extends State<StudentCourseDetailScreen> {
 
       print('👤 Found cached user: ${cachedUser.email} (Local ID: ${cachedUser.id})');
 
-      // Get sessions for this course and student
+      // Fetch sessions and attendance from backend first
+      await _fetchSessionsFromBackend();
+
+      // Get sessions for this course from local DB (now updated with backend data)
       final sessions = await db.getSessionsByCourse(widget.course.id);
       print('📅 Found ${sessions.length} sessions for course ${widget.course.code}');
       
@@ -81,7 +96,7 @@ class _StudentCourseDetailScreenState extends State<StudentCourseDetailScreen> {
       }
 
       final percentage = sessions.isEmpty ? 0.0 : (attended / sessions.length) * 100;
-      print('📈 Attendance: $attended/${ sessions.length} sessions = ${percentage.toStringAsFixed(1)}%');
+      print('📈 Attendance: $attended/${sessions.length} sessions = ${percentage.toStringAsFixed(1)}%');
 
       if (mounted) {
         setState(() {
@@ -99,8 +114,151 @@ class _StudentCourseDetailScreenState extends State<StudentCourseDetailScreen> {
     }
   }
 
+  Future<void> _fetchSessionsFromBackend() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        print('❌ [_fetchSessionsFromBackend] No Firebase user logged in');
+        return;
+      }
+      
+      final idToken = await user.getIdToken();
+      if (idToken == null) {
+        print('❌ [_fetchSessionsFromBackend] No ID token available');
+        return;
+      }
+      
+      const overrideUrl = String.fromEnvironment('BACKEND_URL');
+      final baseUrl = overrideUrl.isNotEmpty ? overrideUrl : 'https://att-back-0xvj.onrender.com';
+      
+      print('🔍 [_fetchSessionsFromBackend] Fetching sessions from: $baseUrl/student/my-sessions');
+      
+      // Fetch all sessions for the student's enrolled courses
+      final sessionsResponse = await http.get(
+        Uri.parse(baseUrl).resolve('/student/my-sessions'),
+        headers: {'Authorization': 'Bearer $idToken'},
+      ).timeout(const Duration(seconds: 10));
+      
+      print('📡 [_fetchSessionsFromBackend] Response status: ${sessionsResponse.statusCode}');
+      
+      if (sessionsResponse.statusCode != 200) {
+        print('❌ [_fetchSessionsFromBackend] Failed with status ${sessionsResponse.statusCode}: ${sessionsResponse.body}');
+        return;
+      }
+      
+      final sessionsList = jsonDecode(sessionsResponse.body) as List? ?? [];
+      print('📊 [_fetchSessionsFromBackend] Got ${sessionsList.length} total sessions from backend');
+      
+      final db = DatabaseProvider.of(context);
+      
+      // Filter sessions for this specific course
+      int processedCount = 0;
+      for (final sessionJson in sessionsList) {
+        try {
+          final courseCode = sessionJson['course_code']?.toString() ?? '';
+          final sessionId = sessionJson['session_id']?.toString() ?? '';
+          final startTimeStr = sessionJson['start_time']?.toString() ?? '';
+          final endTimeStr = sessionJson['end_time']?.toString();
+          final attendanceStatus = sessionJson['attendance_status'] as String?;
+          
+          print('📋 [_fetchSessionsFromBackend] Processing session: code=$courseCode, id=$sessionId, status=$attendanceStatus');
+          
+          // Only process sessions for this course
+          if (courseCode != widget.course.code) {
+            print('   ⏭️  Skipping - different course ($courseCode != ${widget.course.code})');
+            continue;
+          }
+          
+          if (sessionId.isEmpty || startTimeStr.isEmpty) {
+            print('   ❌ Skipping - missing sessionId or startTime');
+            continue;
+          }
+          
+          final startTime = DateTime.tryParse(startTimeStr);
+          final endTime = endTimeStr != null ? DateTime.tryParse(endTimeStr) : null;
+          
+          if (startTime == null) {
+            print('   ❌ Skipping - invalid start time: $startTimeStr');
+            continue;
+          }
+          
+          print('   ✅ Valid session - storing in local DB');
+          
+          // Store session in local DB
+          await db.upsertSessionFromServer(
+            serverId: sessionId,
+            courseLocalId: widget.course.id,
+            startTime: startTime,
+            endTime: endTime,
+            status: 'active',
+          );
+          
+          processedCount++;
+          
+          // If there's attendance status, store it too
+          if (attendanceStatus != null) {
+            print('   📝 Storing attendance status: $attendanceStatus');
+            final localSession = await db.getSessionByServerId(sessionId);
+            final cachedUser = await db.getUserByFirebaseUid(user.uid);
+            
+            if (localSession != null && cachedUser != null) {
+              // Check if attendance already exists
+              final existingAttendance = await db.getAttendanceByStudentAndSession(
+                cachedUser.id,
+                localSession.id,
+              );
+              
+              if (existingAttendance == null) {
+                // Create new attendance record
+                await db.markAttendance(
+                  AttendanceRecordsCompanion.insert(
+                    serverId: const Value(null),
+                    sessionId: localSession.id,
+                    studentId: cachedUser.id,
+                    status: attendanceStatus,
+                    markedAt: Value(startTime),
+                    faceVerified: const Value(false),
+                    verificationMethod: const Value('qr'),
+                    synced: const Value(true),
+                  ),
+                );
+                print('      ✅ Attendance record created');
+              } else {
+                print('      ⏭️  Attendance already exists');
+              }
+            } else {
+              print('      ❌ Could not find session or user in local DB');
+              if (localSession == null) print('         - localSession is null');
+              if (cachedUser == null) print('         - cachedUser is null');
+            }
+          } else {
+            print('   ℹ️  No attendance status from backend');
+          }
+        } catch (e) {
+          print('❌ [_fetchSessionsFromBackend] Error processing session: $e');
+        }
+      }
+      
+      print('📈 [_fetchSessionsFromBackend] Successfully processed $processedCount sessions for ${widget.course.code}');
+    } catch (e) {
+      print('❌ [_fetchSessionsFromBackend] Fatal error: $e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Show loading screen until initial data is loaded
+    if (!_isInitialLoadDone) {
+      return Scaffold(
+        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+        body: const Center(
+          child: CircularProgressIndicator(
+            valueColor: AlwaysStoppedAnimation<Color>(AppColors.primaryBlue),
+          ),
+        ),
+      );
+    }
+    
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: _isLoading

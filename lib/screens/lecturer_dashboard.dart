@@ -34,14 +34,24 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
   int? _lecturerId;
   late SyncService _syncService;
   List<Course> _courses = [];
+  bool _isInitialLoadDone = false;
 
   @override
   void initState() {
     super.initState();
     _initializeSync();
-    _loadUserInfo();
-    _loadCourses();
-    _refreshCoursesFromBackend();
+    _performInitialLoad();
+  }
+
+  Future<void> _performInitialLoad() async {
+    await Future.wait([
+      _loadUserInfo(),
+      _loadCourses(),
+      _refreshCoursesFromBackend(),
+    ]);
+    if (mounted) {
+      setState(() => _isInitialLoadDone = true);
+    }
   }
 
   void _initializeSync() {
@@ -68,8 +78,17 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
       final courses = _lecturerId != null
           ? await db.getCoursesByLecturer(_lecturerId!)
           : await db.getAllCourses();
-      if (courses.isNotEmpty && mounted) {
-        setState(() => _courses = courses);
+      
+      // Deduplicate courses by ID to prevent UI duplication
+      final seen = <int>{};
+      final uniqueCourses = courses.where((course) {
+        if (seen.contains(course.id)) return false;
+        seen.add(course.id);
+        return true;
+      }).toList();
+      
+      if (uniqueCourses.isNotEmpty && mounted) {
+        setState(() => _courses = uniqueCourses);
       }
     } catch (e) {
       // Silently fail
@@ -101,6 +120,10 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
           : const [];
 
       final db = DatabaseProvider.of(context);
+      
+      // Track processed course IDs to avoid duplicates in this sync operation
+      final processedCourseIds = <String>{};
+      
       for (final item in courses) {
         if (item is! Map) continue;
         final serverId = item['course_id']?.toString();
@@ -108,6 +131,10 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
         final name = item['course_name']?.toString();
         final lecturerId = item['lecturer_id'] is int ? item['lecturer_id'] as int : null;
         if (serverId == null || code == null || name == null) continue;
+        
+        // Skip if already processed in this sync
+        if (processedCourseIds.contains(serverId)) continue;
+        processedCourseIds.add(serverId);
 
         await db.upsertCourseFromServer(
           serverId: serverId,
@@ -340,6 +367,18 @@ class _LecturerDashboardState extends State<LecturerDashboard> {
 
   @override
   Widget build(BuildContext context) {
+    // Show loading screen until initial data is loaded
+    if (!_isInitialLoadDone) {
+      return Scaffold(
+        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+        body: const Center(
+          child: CircularProgressIndicator(
+            valueColor: AlwaysStoppedAnimation<Color>(AppColors.primaryBlue),
+          ),
+        ),
+      );
+    }
+    
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: RefreshIndicator(

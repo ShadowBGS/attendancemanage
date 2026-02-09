@@ -110,11 +110,24 @@ class _WifiDirectScanScreenState extends State<WifiDirectScanScreen> {
     final user = FirebaseAuth.instance.currentUser;
     final studentId = user?.uid ?? 'guest-${DateTime.now().millisecondsSinceEpoch}';
     final studentName = user?.displayName ?? user?.email ?? 'Guest';
+    
+    // Get student's matric number from local database for offline display
+    String? matricNumber;
+    try {
+      final db = DatabaseProvider.of(context);
+      if (user != null) {
+        final localUser = await db.getUserByFirebaseUid(user.uid);
+        matricNumber = localUser?.externalId;
+      }
+    } catch (e) {
+      // If we can't get matric, continue anyway
+    }
 
     final result = await _clientService.joinAndSend(
       payload: payload,
       studentId: studentId,
       studentName: studentName,
+      matricNumber: matricNumber,
       onStatus: (status) {
         if (!mounted) return;
         setState(() => _status = status);

@@ -34,11 +34,12 @@ class WifiDirectHostScreen extends StatefulWidget {
   State<WifiDirectHostScreen> createState() => _WifiDirectHostScreenState();
 }
 
-class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
+class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> with WidgetsBindingObserver {
   final WifiDirectSessionService _service = WifiDirectSessionService();
   WifiDirectPayload? _payload;
   bool _loading = true;
   String? _status;
+  String? _errorMessage;
   final List<AttendanceMessage> _attendees = [];
   final List<AttendanceMessage> _pendingPersist = [];
   List<P2pClientInfo> _clients = const [];
@@ -48,15 +49,40 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
   Timer? _refreshTimer;
   Timer? _countdownTimer;
   int _secondsRemaining = 60;
+  
+  // Cache student details to avoid repeated database lookups
+  final Map<String, String?> _matricCache = {};
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _start();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // Clean up hotspot only when app is actually closing, not when going to background
+    if (state == AppLifecycleState.detached) {
+      print('🚪 App closing, cleaning up hotspot...');
+      _cleanupHotspot();
+    }
   }
 
   Future<void> _start() async {
     try {
+      // IMPORTANT: Stop any existing hotspot first to avoid "Caller already has an active LocalOnlyHotspot" error
+      print('🧹 Ensuring any existing hotspot is stopped before starting new one...');
+      try {
+        await _service.stopHostSession();
+        await Future.delayed(const Duration(milliseconds: 500)); // Give system time to cleanup
+        print('✅ Existing hotspot stopped');
+      } catch (e) {
+        print('⚠️  Error stopping existing hotspot (may not exist): $e');
+        // Continue anyway - it's ok if there was no existing hotspot
+      }
+
       final payload = await _service.startHostSession(
         courseCode: widget.courseCode,
         courseName: widget.courseName,
@@ -71,6 +97,7 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
         _payload = payload;
         _loading = false;
         _status = null;
+        _errorMessage = null;
         _secondsRemaining = 60;
       });
 
@@ -86,6 +113,11 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
       _sub = _service.attendanceStream.listen((msg) async {
         // Always update UI first.
         if (mounted) {
+          // Cache matric number from the message itself (sent by student)
+          if (msg.matricNumber != null && msg.matricNumber!.isNotEmpty) {
+            _matricCache[msg.studentId] = msg.matricNumber;
+          }
+          
           setState(() {
             _attendees.removeWhere((m) => m.studentId == msg.studentId);
             _attendees.add(msg);
@@ -243,12 +275,42 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
       }
       _pendingPersist.clear();
     } catch (e) {
-      if (!mounted) return;
-      setState(() => _loading = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to start session: $e')),
-      );
+      print('❌ [WiFi Host] Fatal error starting session: $e');
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _errorMessage = e.toString();
+        });
+      }
     }
+  }
+
+  void _showErrorDialog(String title, String message) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Dismiss'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              // Retry starting the session
+              setState(() {
+                _loading = true;
+                _errorMessage = null;
+              });
+              _start();
+            },
+            child: const Text('Retry'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _startRefreshTimers() {
@@ -293,14 +355,36 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
     }
   }
 
+  Future<void> _cleanupHotspot() async {
+    print('🛑 Cleaning up WiFi Direct hotspot...');
+    try {
+      await _service.stopHostSession();
+      print('✅ Hotspot stopped');
+    } catch (e) {
+      print('⚠️  Error stopping hotspot: $e');
+    }
+  }
+
   @override
   void dispose() {
+    print('🔴 WifiDirectHostScreen.dispose() called');
+    WidgetsBinding.instance.removeObserver(this);
+    
     _refreshTimer?.cancel();
     _countdownTimer?.cancel();
     _sub?.cancel();
     _clientSub?.cancel();
-    _service.stopHostSession();
-    _service.dispose();
+    
+    print('🛑 Stopping WiFi Direct host session and cleaning up hotspot...');
+    // Use synchronous cleanup in dispose to ensure it happens before screen is destroyed
+    _cleanupHotspot().then((_) {
+      _service.dispose();
+      print('✅ WiFi Direct cleanup complete');
+    }).catchError((e) {
+      print('❌ Error during cleanup: $e');
+      _service.dispose();
+    });
+    
     super.dispose();
   }
 
@@ -310,6 +394,85 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
     final displayDate = widget.sessionDate.millisecondsSinceEpoch > 0 
         ? widget.sessionDate 
         : DateTime.now();
+    
+    // Show error state if session failed to start
+    if (_errorMessage != null) {
+      return Scaffold(
+        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+        body: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    color: Colors.red.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: const Center(
+                    child: Icon(
+                      Icons.error_outline,
+                      size: 40,
+                      color: Colors.red,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                Text(
+                  'Session Failed',
+                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  _errorMessage!,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                const SizedBox(height: 32),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.pop(context),
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        child: const Text('Back'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () {
+                          setState(() {
+                            _loading = true;
+                            _errorMessage = null;
+                          });
+                          _start();
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.primaryBlue,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        child: const Text(
+                          'Retry',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
     
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
@@ -564,29 +727,16 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
                                         ],
                                       ),
                                     )
-                                  : FutureBuilder<List<Map<String, dynamic>>>(
-                                      future: _getStudentDetails(_attendees.take(3).toList()),
-                                      builder: (context, snapshot) {
-                                        if (!snapshot.hasData) {
-                                          return const Center(
-                                            child: Padding(
-                                              padding: EdgeInsets.all(16.0),
-                                              child: CircularProgressIndicator(),
-                                            ),
-                                          );
-                                        }
-
-                                        final students = snapshot.data!;
-                                        return ListView.builder(
-                                          physics: const NeverScrollableScrollPhysics(),
-                                          shrinkWrap: true,
-                                          itemCount: students.length,
-                                          itemBuilder: (context, index) {
-                                            final student = students[index];
-                                            final a = _attendees[index];
-                                            final initials = _getInitials(a.studentName);
-                                            final color = _getColorForIndex(index);
-                                            final matricNumber = student['matricNumber'] as String?;
+                                  : ListView.builder(
+                                      physics: const NeverScrollableScrollPhysics(),
+                                      shrinkWrap: true,
+                                      itemCount: _attendees.take(3).length,
+                                      itemBuilder: (context, index) {
+                                        final a = _attendees[index];
+                                        final initials = _getInitials(a.studentName);
+                                        final color = _getColorForIndex(index);
+                                        // Use cached matric number for instant display
+                                        final matricNumber = _matricCache[a.studentId];
 
                                             return Container(
                                               margin: const EdgeInsets.only(bottom: 12),
@@ -663,9 +813,7 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
                                               ),
                                             );
                                           },
-                                        );
-                                      },
-                                    ),
+                                        ),
                             ],
                           ),
                         ),
@@ -743,27 +891,42 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
     try {
       final db = DatabaseProvider.of(context);
       
-      // End the session in database
-      if (_sessionLocalId != null) {
+      // Check if we have any attendees (QR code was actually used)
+      if (_attendees.isEmpty && _sessionLocalId != null) {
+        print('⚠️  Session has no attendees - deleting empty session');
+        // Delete session if no one attended (QR code was never scanned)
+        await db.deleteSession(_sessionLocalId!);
+        print('✅ Empty session deleted');
+      } else if (_sessionLocalId != null) {
+        // End the session in database
         await db.updateSessionStatus(_sessionLocalId!, 'completed', DateTime.now());
-        print('✅ Session ended with ID: $_sessionLocalId');
+        print('✅ Session ended with ID: $_sessionLocalId, attendees: ${_attendees.length}');
+        
+        // Sync to backend
+        print('🔄 Calling _syncSessionToBackend()...');
+        await _syncSessionToBackend();
+        print('✅ _syncSessionToBackend() completed');
       }
-
-      // Sync to backend
-      print('🔄 Calling _syncSessionToBackend()...');
-      await _syncSessionToBackend();
-      print('✅ _syncSessionToBackend() completed');
 
       if (!mounted) return;
       Navigator.of(context).pop(); // Close loading dialog
       Navigator.of(context).pop(); // Go back to dashboard
       
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✅ Session ended and synced successfully'),
-          backgroundColor: Colors.green,
-        ),
-      );
+      if (_attendees.isNotEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('✅ Session ended and synced successfully'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('ℹ️  Session was empty and has been discarded'),
+            backgroundColor: Colors.blue,
+          ),
+        );
+      }
     } catch (e) {
       print('❌ Error ending session: $e');
       if (!mounted) return;
@@ -781,6 +944,8 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
 
   /// Create session on server and return the server session ID
   Future<String> _createSessionOnServer() async {
+    print('🟦 _createSessionOnServer() started');
+    
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       throw Exception('User not authenticated');
@@ -801,26 +966,35 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
       throw Exception('Course not found');
     }
 
+    print('📚 Course found: ${course.code} (local ID: ${course.id}, server ID: ${course.serverId})');
+
     // Resolve courseServerId
     int? courseServerId;
     if (course.serverId != null && course.serverId!.isNotEmpty) {
       courseServerId = int.tryParse(course.serverId!);
+      print('✅ Using course server ID: $courseServerId');
     } else {
+      print('⚠️  No server ID on local course, fetching from backend...');
       // Fetch from server
       final courseResponse = await http.get(
         Uri.parse('$baseUrl/courses/my-courses'),
         headers: {'Authorization': 'Bearer $idToken'},
       ).timeout(const Duration(seconds: 10));
       
+      print('📡 Courses endpoint returned: ${courseResponse.statusCode}');
+      
       if (courseResponse.statusCode == 200) {
         final decoded = jsonDecode(courseResponse.body);
+        print('   Response: $decoded');
         final coursesList = (decoded is List) ? decoded : (decoded is Map && decoded['data'] is List) ? decoded['data'] : [];
         
         for (final c in coursesList) {
           if (c is Map) {
             final backendCode = c['code'] ?? c['course_code'];
+            print('   Checking course: $backendCode against ${course.code}');
             if (backendCode == course.code) {
               courseServerId = c['id'] as int?;
+              print('   ✅ Found matching course with server ID: $courseServerId');
               break;
             }
           }
@@ -841,6 +1015,8 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
       'status': 'active',
     };
 
+    print('📤 Creating session on server with payload: $sessionPayload');
+
     final sessionResponse = await http.post(
       Uri.parse('$baseUrl/sessions/create'),
       headers: {
@@ -850,17 +1026,24 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
       body: jsonEncode(sessionPayload),
     ).timeout(const Duration(seconds: 30));
 
+    print('📡 Session creation response: ${sessionResponse.statusCode}');
+    print('   Body: ${sessionResponse.body}');
+
     if (sessionResponse.statusCode != 200 && sessionResponse.statusCode != 201) {
-      throw Exception('Session creation failed: ${sessionResponse.statusCode}');
+      throw Exception('Session creation failed: ${sessionResponse.statusCode} - ${sessionResponse.body}');
     }
 
     final sessionData = jsonDecode(sessionResponse.body);
+    print('   Decoded: $sessionData');
+    
     final serverSessionId = sessionData['id'] ?? sessionData['session_id'];
     
     if (serverSessionId == null) {
+      print('❌ No session ID in response: $sessionData');
       throw Exception('No session ID in response');
     }
 
+    print('✅ Server session created with ID: $serverSessionId');
     return serverSessionId.toString();
   }
 
@@ -1082,18 +1265,33 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> {
   }
 
   Future<List<Map<String, dynamic>>> _getStudentDetails(List<AttendanceMessage> attendees) async {
-    final db = DatabaseProvider.of(context);
     final results = <Map<String, dynamic>>[];
 
     for (final attendee in attendees) {
-      final user = await db.getUserByFirebaseUid(attendee.studentId);
+      // Use cached matric (populated from attendance message)
+      final matric = _matricCache[attendee.studentId];
+      
       results.add({
-        'matricNumber': user?.externalId,
+        'matricNumber': matric,
         'studentId': attendee.studentId,
       });
     }
 
     return results;
+  }
+
+  // Removed - no longer needed as we cache from local DB immediately
+
+  Future<String?> _getSessionServerId() async {
+    if (_sessionLocalId == null) return null;
+    
+    try {
+      final db = DatabaseProvider.of(context);
+      final session = await (db.select(db.sessions)..where((s) => s.id.equals(_sessionLocalId!))).getSingleOrNull();
+      return session?.serverId;
+    } catch (e) {
+      return null;
+    }
   }
 
   String _getInitials(String name) {
@@ -1167,27 +1365,17 @@ class _StudentListScreen extends StatelessWidget {
 
           // Student List
           Expanded(
-            child: FutureBuilder<List<Map<String, dynamic>>>(
-              future: _getStudentDetails(context, attendees),
-              builder: (context, snapshot) {
-                if (!snapshot.hasData) {
-                  return const Center(
-                    child: CircularProgressIndicator(),
-                  );
-                }
+            child: ListView.builder(
+              padding: const EdgeInsets.all(16),
+              itemCount: attendees.length,
+              itemBuilder: (context, index) {
+                final a = attendees[index];
+                final initials = _getInitials(a.studentName);
+                final color = _getColorForIndex(index);
+                // Use matric from message directly - no database lookup needed
+                final matricNumber = a.matricNumber;
 
-                final students = snapshot.data!;
-                return ListView.builder(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: attendees.length,
-                  itemBuilder: (context, index) {
-                    final a = attendees[index];
-                    final student = students[index];
-                    final initials = _getInitials(a.studentName);
-                    final color = _getColorForIndex(index);
-                    final matricNumber = student['matricNumber'] as String?;
-
-                    return Container(
+                return Container(
                       margin: const EdgeInsets.only(bottom: 12),
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
@@ -1262,28 +1450,11 @@ class _StudentListScreen extends StatelessWidget {
                       ),
                     );
                   },
-                );
-              },
-            ),
+                ),
           ),
         ],
       ),
     );
-  }
-
-  Future<List<Map<String, dynamic>>> _getStudentDetails(BuildContext context, List<AttendanceMessage> attendees) async {
-    final db = DatabaseProvider.of(context);
-    final results = <Map<String, dynamic>>[];
-
-    for (final attendee in attendees) {
-      final user = await db.getUserByFirebaseUid(attendee.studentId);
-      results.add({
-        'matricNumber': user?.externalId,
-        'studentId': attendee.studentId,
-      });
-    }
-
-    return results;
   }
 
   String _getInitials(String name) {

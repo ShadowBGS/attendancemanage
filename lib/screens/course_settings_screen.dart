@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+//import 'package:firebase_auth/firebase_auth.dart';
 
 import '../db/database.dart';
 import '../db/database_provider.dart';
@@ -167,10 +167,10 @@ class _CourseSettingsScreenState extends State<CourseSettingsScreen> {
                         children: [
                           Text(
                             'Course Information',
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.bold,
-                              // color: Colors.black87,
+                              color: Theme.of(context).textTheme.bodyLarge?.color,
                             ),
                           ),
                           const SizedBox(height: 16),
@@ -215,7 +215,12 @@ class _CourseSettingsScreenState extends State<CourseSettingsScreen> {
                             subtitle: 'Update course code, name, and description',
                             onTap: _isLoading ? null : _editCourse,
                           ),
-                          Divider(height: 1, color: Colors.grey[200]),
+                          Divider(
+                            height: 1,
+                            color: Theme.of(context).brightness == Brightness.dark
+                                ? Colors.grey[700]
+                                : Colors.grey[200],
+                          ),
                           _buildSettingsTile(
                             icon: Icons.delete_outline,
                             title: 'Delete Course',
@@ -266,7 +271,9 @@ class _CourseSettingsScreenState extends State<CourseSettingsScreen> {
                                       : 'Course will sync when connection is available',
                                   style: TextStyle(
                                     fontSize: 12,
-                                    color: Colors.grey[700],
+                                    color: Theme.of(context).brightness == Brightness.dark
+                                        ? Colors.grey[400]
+                                        : Colors.grey[700],
                                   ),
                                 ),
                               ],
@@ -298,7 +305,9 @@ class _CourseSettingsScreenState extends State<CourseSettingsScreen> {
             style: TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w600,
-              color: Colors.grey[600],
+              color: Theme.of(context).brightness == Brightness.dark
+                  ? Colors.grey[400]
+                  : Colors.grey[600],
             ),
           ),
         ),
@@ -337,10 +346,18 @@ class _CourseSettingsScreenState extends State<CourseSettingsScreen> {
         subtitle,
         style: TextStyle(
           fontSize: 13,
-          color: Colors.grey[600],
+          color: Theme.of(context).brightness == Brightness.dark
+              ? Colors.grey[400]
+              : Colors.grey[600],
         ),
       ),
-      trailing: Icon(Icons.arrow_forward_ios, size: 14, color: Colors.grey[400]),
+      trailing: Icon(
+        Icons.arrow_forward_ios,
+        size: 14,
+        color: Theme.of(context).brightness == Brightness.dark
+            ? Colors.grey[600]
+            : Colors.grey[400],
+      ),
       onTap: onTap,
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
     );

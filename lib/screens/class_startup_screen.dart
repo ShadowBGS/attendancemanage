@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../theme/app_colors.dart';
-import '../services/wifi_direct_session_service.dart';
+//import '../services/wifi_direct_session_service.dart';
 import 'wifi_direct_host_screen.dart';
 
 /// Loading screen that checks permissions and services before starting a class
@@ -24,18 +25,51 @@ class _ClassStartupScreenState extends State<ClassStartupScreen> {
   String _statusMessage = 'Preparing to start class...';
   bool _hasError = false;
   String _errorMessage = '';
+  late Connectivity _connectivity;
 
   @override
   void initState() {
     super.initState();
+    _connectivity = Connectivity();
     _checkPermissionsAndStart();
   }
 
   Future<void> _checkPermissionsAndStart() async {
     try {
-      // Check WiFi Direct permissions
-      setState(() => _statusMessage = 'Checking Wi‑Fi Direct permissions...');
-      await _ensurePermissionsForHost();
+      // Pre-flight check: Verify WiFi status
+      setState(() => _statusMessage = 'Checking WiFi status...');
+      final connectivity = await _connectivity.checkConnectivity();
+      
+      // Check if WiFi is currently connected or available
+      bool wifiAvailable = false;
+      for (final conn in connectivity) {
+        if (conn == ConnectivityResult.wifi) {
+          wifiAvailable = true;
+          break;
+        }
+      }
+      
+      if (!wifiAvailable) {
+        throw 'WiFi is not connected. Please enable WiFi before starting class.';
+      }
+      
+      // Pre-flight check: Verify mobile hotspot is disabled
+      setState(() => _statusMessage = 'Verifying hotspot is disabled...');
+      // Note: Direct hotspot detection is platform-specific, but the system will reject
+      // hotspot + WiFi Direct at createGroup time. This check is informational.
+      print('⚠️  [ClassStartupScreen] Hotspot must be OFF. WiFi Direct and tethering cannot coexist.');
+      
+      setState(() => _statusMessage = 'Checking WiFi Direct permissions...');
+      await Future.delayed(const Duration(milliseconds: 200));
+      
+      setState(() => _statusMessage = 'Enabling WiFi services...');
+      await Future.delayed(const Duration(milliseconds: 200));
+      
+      setState(() => _statusMessage = 'Enabling Location services...');
+      await Future.delayed(const Duration(milliseconds: 200));
+      
+      setState(() => _statusMessage = 'Finalizing setup...');
+      await Future.delayed(const Duration(milliseconds: 200));
 
       // All checks passed, navigate to the actual class screen
       if (mounted) {
@@ -57,28 +91,6 @@ class _ClassStartupScreenState extends State<ClassStartupScreen> {
           _errorMessage = e.toString();
         });
       }
-    }
-  }
-
-  Future<void> _ensurePermissionsForHost() async {
-    // This mirrors the permission check from wifi_direct_session_service
-    // For a host, we don't need Bluetooth, but we need WiFi Direct, WiFi, and Location
-    const timeout = Duration(seconds: 45);
-    
-    try {
-      setState(() => _statusMessage = 'Requesting Wi‑Fi Direct permissions...');
-      await Future.delayed(const Duration(milliseconds: 500));
-      
-      setState(() => _statusMessage = 'Enabling Wi-Fi services...');
-      await Future.delayed(const Duration(milliseconds: 500));
-      
-      setState(() => _statusMessage = 'Enabling Location services...');
-      await Future.delayed(const Duration(milliseconds: 500));
-      
-      setState(() => _statusMessage = 'Finalizing setup...');
-      await Future.delayed(const Duration(milliseconds: 500));
-    } on Exception catch (e) {
-      throw 'Permission setup failed: $e';
     }
   }
 
@@ -106,7 +118,7 @@ class _ClassStartupScreenState extends State<ClassStartupScreen> {
                   width: 80,
                   height: 80,
                   decoration: BoxDecoration(
-                    color: AppColors.primaryBlue.withOpacity(0.1),
+                    color: AppColors.primaryBlue.withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(16),
                   ),
                   child: const Center(
@@ -145,6 +157,8 @@ class _ClassStartupScreenState extends State<ClassStartupScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      _buildCheckItem('Hotspot is OFF', true),
+                      const SizedBox(height: 8),
                       _buildCheckItem('Wi‑Fi Direct', true),
                       const SizedBox(height: 8),
                       _buildCheckItem('Location Services', true),
@@ -153,12 +167,41 @@ class _ClassStartupScreenState extends State<ClassStartupScreen> {
                     ],
                   ),
                 ),
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.info_outline,
+                        size: 20,
+                        color: Colors.orange.shade700,
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          'Important: Mobile hotspot/tethering must be OFF for WiFi Direct to work.',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.orange.shade700,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ] else ...[
                 Container(
                   width: 80,
                   height: 80,
                   decoration: BoxDecoration(
-                    color: Colors.red.withOpacity(0.1),
+                    color: Colors.red.withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(16),
                   ),
                   child: Center(

@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import '../theme/app_colors.dart';
-import '../db/database_provider.dart';
 
 class EmailVerificationScreen extends StatefulWidget {
   final String role;
@@ -184,7 +182,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
                   width: 100,
                   height: 100,
                   decoration: BoxDecoration(
-                    color: themeColor.withOpacity(0.1),
+                    color: themeColor.withValues(alpha: 0.1),
                     shape: BoxShape.circle,
                   ),
                   child: Center(
@@ -231,9 +229,9 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
                   Container(
                     padding: const EdgeInsets.all(20),
                     decoration: BoxDecoration(
-                      color: Colors.blue.withOpacity(0.05),
+                      color: Colors.blue.withValues(alpha: 0.05),
                       borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.blue.withOpacity(0.2)),
+                      border: Border.all(color: Colors.blue.withValues(alpha: 0.2)),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,

@@ -19,6 +19,7 @@ class _MyClassesScreenState extends State<MyClassesScreen> {
   final TextEditingController _searchController = TextEditingController();
   int _currentNavIndex = 1; // Classes tab selected
   bool _didLoadInitialData = false;
+  bool _isInitialLoadDone = false;
   Timer? _searchDebounce;
 
   @override
@@ -37,7 +38,14 @@ class _MyClassesScreenState extends State<MyClassesScreen> {
     super.didChangeDependencies();
     if (!_didLoadInitialData) {
       _didLoadInitialData = true;
-      _loadClasses();
+      _performInitialLoad();
+    }
+  }
+
+  Future<void> _performInitialLoad() async {
+    await _loadClasses();
+    if (mounted) {
+      setState(() => _isInitialLoadDone = true);
     }
   }
 
@@ -85,6 +93,18 @@ class _MyClassesScreenState extends State<MyClassesScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Show loading screen until initial data is loaded
+    if (!_isInitialLoadDone) {
+      return Scaffold(
+        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+        body: const Center(
+          child: CircularProgressIndicator(
+            valueColor: AlwaysStoppedAnimation<Color>(AppColors.primaryBlue),
+          ),
+        ),
+      );
+    }
+    
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: SafeArea(

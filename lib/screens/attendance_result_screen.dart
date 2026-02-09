@@ -1,8 +1,14 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:http/http.dart' as http;
+//import 'package:drift/drift.dart' show Value;
 import '../db/database_provider.dart';
-import '../services/sync_service.dart';
+import '../theme/app_colors.dart';
+//import '../db/database.dart';
+//import '../services/sync_service.dart';
 
 class AttendanceResultScreen extends StatefulWidget {
   final bool success;
@@ -47,10 +53,67 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
       final baseUrl = overrideUrl.isNotEmpty ? overrideUrl : 'https://att-back-0xvj.onrender.com';
       final db = DatabaseProvider.of(context);
 
-      final sync = SyncService(database: db, baseUrl: baseUrl);
+      // Wait a few seconds for lecturer to sync attendance to backend
+      // The backend will auto-enroll the student when attendance is synced
+      await Future.delayed(const Duration(seconds: 3));
       
-      // Push any pending changes first, then pull latest data
-      await sync.syncPendingChanges();
+      // Fetch updated courses and enrollments from backend
+      try {
+        final idToken = await user.getIdToken();
+        if (idToken != null) {
+          final coursesResponse = await http.get(
+            Uri.parse(baseUrl).resolve('/student/my-courses'),
+            headers: {'Authorization': 'Bearer $idToken'},
+          ).timeout(const Duration(seconds: 10));
+
+          if (coursesResponse.statusCode == 200) {
+            final coursesData = jsonDecode(coursesResponse.body);
+            final enrolledCourses = coursesData['enrolled_courses'] as List? ?? [];
+            
+            // Get current user's local ID
+            final currentUser = await db.getUserByFirebaseUid(user.uid);
+            if (currentUser != null) {
+              // Track processed course IDs to avoid duplicates in this sync operation
+              final processedCourseIds = <String>{};
+              
+              // Store courses and enrollments in local DB
+              for (final courseJson in enrolledCourses) {
+                try {
+                  final courseId = courseJson['course_id']?.toString() ?? '';
+                  final courseCode = courseJson['course_code']?.toString() ?? '';
+                  final courseName = courseJson['course_name']?.toString() ?? '';
+                  final lecturerId = courseJson['lecturer_id'] as int?;
+                  
+                  if (courseId.isEmpty || processedCourseIds.contains(courseId)) continue;
+                  processedCourseIds.add(courseId);
+                  
+                  // Upsert course
+                  await db.upsertCourseFromServer(
+                    serverId: courseId,
+                    code: courseCode,
+                    name: courseName,
+                    description: null,
+                    lecturerId: lecturerId,
+                  );
+                  
+                  // Get the local course to create enrollment
+                  final localCourse = await db.getCourseByServerId(courseId);
+                  if (localCourse != null) {
+                    await db.ensureEnrollment(
+                      studentLocalId: currentUser.id,
+                      courseLocalId: localCourse.id,
+                    );
+                  }
+                } catch (e) {
+                  // Ignore local caching errors; backend already created it.
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Silently fail if fetching courses after attendance fails
+      }
       
       if (mounted) {
         setState(() => _syncing = false);
@@ -70,13 +133,14 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
         backgroundColor: Colors.transparent,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.black),
+          icon: Icon(Icons.arrow_back, color: Theme.of(context).appBarTheme.iconTheme?.color ?? Theme.of(context).textTheme.bodyLarge?.color),
           onPressed: () => Navigator.pop(context),
         ),
-        title: const Text(
+        title: Text(
           'Check-in',
-          style: TextStyle(
-            color: Colors.black,
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+            fontWeight: FontWeight.bold,
+          ) ?? const TextStyle(
             fontSize: 20,
             fontWeight: FontWeight.bold,
           ),
@@ -99,12 +163,12 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
                         height: 160,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          color: widget.success ? const Color(0xFF4CAF50) : const Color(0xFFE53935),
+                          color: widget.success ? AppColors.successGreen : AppColors.errorRed,
                           boxShadow: [
                             BoxShadow(
                               color: widget.success 
-                                  ? const Color(0xFF4CAF50).withOpacity(0.3)
-                                  : const Color(0xFFE53935).withOpacity(0.3),
+                                  ? AppColors.successGreen.withValues(alpha: 0.3)
+                                  : AppColors.errorRed.withValues(alpha: 0.3),
                               blurRadius: 40,
                               spreadRadius: 10,
                             ),
@@ -124,10 +188,11 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
                         _syncing
                             ? 'Syncing your record...'
                             : (widget.success ? 'Attendance Recorded!' : 'Attendance Failed'),
-                        style: const TextStyle(
+                        style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ) ?? const TextStyle(
                           fontSize: 28,
                           fontWeight: FontWeight.bold,
-                          color: Colors.black,
                         ),
                       ),
 
@@ -135,9 +200,11 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
 
                       // Subtitle
                       if (widget.success)
-                        const Text(
+                        Text(
                           "You're all set for today's session.",
-                          style: TextStyle(
+                          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                            color: Theme.of(context).textTheme.bodyMedium?.color?.withValues(alpha: 0.7),
+                          ) ?? const TextStyle(
                             fontSize: 16,
                             color: Colors.grey,
                           ),
@@ -150,11 +217,11 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
                         width: double.infinity,
                         padding: const EdgeInsets.all(24),
                         decoration: BoxDecoration(
-                          color: Colors.white,
+                          color: Theme.of(context).cardColor,
                           borderRadius: BorderRadius.circular(20),
                           boxShadow: [
                             BoxShadow(
-                              color: Colors.black.withOpacity(0.05),
+                              color: Colors.black.withValues(alpha: 0.05),
                               blurRadius: 10,
                               offset: const Offset(0, 4),
                             ),
@@ -170,13 +237,13 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
                                   vertical: 6,
                                 ),
                                 decoration: BoxDecoration(
-                                  color: const Color(0xFF0D47A1).withOpacity(0.1),
+                                  color: AppColors.primaryBlue.withValues(alpha: 0.1),
                                   borderRadius: BorderRadius.circular(8),
                                 ),
-                                child: const Text(
+                                child: Text(
                                   'Current Session',
                                   style: TextStyle(
-                                    color: Color(0xFF0D47A1),
+                                    color: AppColors.primaryBlue,
                                     fontSize: 12,
                                     fontWeight: FontWeight.w600,
                                   ),
@@ -184,9 +251,14 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
                               ),
                               const SizedBox(height: 16),
                             ] else ...[
-                              const Text(
+                              Text(
                                 'SESSION DETAILS',
-                                style: TextStyle(
+                                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  letterSpacing: 0.5,
+                                  color: Theme.of(context).textTheme.bodyMedium?.color?.withValues(alpha: 0.6),
+                                ) ?? const TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.w600,
                                   color: Colors.grey,
@@ -199,10 +271,11 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
                             // Course Code and Name
                             Text(
                               widget.success ? '${widget.courseCode}: ${widget.courseName}' : widget.courseCode,
-                              style: const TextStyle(
+                              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                fontWeight: FontWeight.bold,
+                              ) ?? const TextStyle(
                                 fontSize: 20,
                                 fontWeight: FontWeight.bold,
-                                color: Colors.black,
                               ),
                             ),
 
@@ -210,7 +283,9 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
                               const SizedBox(height: 4),
                               Text(
                                 widget.courseName,
-                                style: const TextStyle(
+                                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                                  color: Theme.of(context).textTheme.bodyMedium?.color?.withValues(alpha: 0.7),
+                                ) ?? const TextStyle(
                                   fontSize: 16,
                                   color: Colors.grey,
                                 ),
@@ -223,15 +298,15 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
                               // Date
                               Row(
                                 children: [
-                                  const Icon(
+                                  Icon(
                                     Icons.calendar_today,
                                     size: 20,
-                                    color: Color(0xFF0D47A1),
+                                    color: AppColors.primaryBlue,
                                   ),
                                   const SizedBox(width: 12),
                                   Text(
                                     DateFormat('MMMM dd, yyyy').format(widget.timestamp!),
-                                    style: const TextStyle(
+                                    style: Theme.of(context).textTheme.bodyLarge ?? const TextStyle(
                                       fontSize: 16,
                                       color: Colors.black87,
                                     ),
@@ -244,15 +319,15 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
                               // Time
                               Row(
                                 children: [
-                                  const Icon(
+                                  Icon(
                                     Icons.access_time,
                                     size: 20,
-                                    color: Color(0xFF0D47A1),
+                                    color: AppColors.primaryBlue,
                                   ),
                                   const SizedBox(width: 12),
                                   Text(
                                     'Checked in at ${DateFormat('h:mm a').format(widget.timestamp!)}',
-                                    style: const TextStyle(
+                                    style: Theme.of(context).textTheme.bodyLarge ?? const TextStyle(
                                       fontSize: 16,
                                       color: Colors.black87,
                                     ),
@@ -270,7 +345,7 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
                           widget.errorMessage!,
                           style: const TextStyle(
                             fontSize: 14,
-                            color: Colors.red,
+                            color: AppColors.errorRed,
                           ),
                           textAlign: TextAlign.center,
                         ),
@@ -305,7 +380,7 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
                           ),
                         ),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF0D47A1),
+                          backgroundColor: AppColors.primaryBlue,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(16),
                           ),
@@ -323,12 +398,11 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
                     child: widget.success
                         ? ElevatedButton(
                             onPressed: () {
-                              // Pop result screen, then scanner screen to return to dashboard
-                              Navigator.pop(context);
+                              // Pop back to dashboard (scan screen was replaced, so just one pop)
                               Navigator.pop(context);
                             },
                             style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF0D47A1),
+                              backgroundColor: AppColors.primaryBlue,
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(16),
                               ),
@@ -345,12 +419,16 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
                           )
                         : TextButton(
                             onPressed: () {
-                              // On failure, just pop back to scanner
+                              // On failure, pop back to dashboard
                               Navigator.pop(context);
                             },
-                            child: const Text(
+                            child: Text(
                               'Back to Dashboard',
-                              style: TextStyle(
+                              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                color: Theme.of(context).textTheme.bodyMedium?.color?.withValues(alpha: 0.6),
+                              ) ?? const TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.w600,
                                 color: Colors.black54,

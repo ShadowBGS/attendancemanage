@@ -9,6 +9,8 @@ class AppColors {
   static const Color background = Color(0xFFF5F5F5);
   static const Color avatarBg = Color(0xFFFFDBC1);
   static const Color avatarIcon = Color(0xFF8B5A3C);
+  static const Color errorRed = Color(0xFFE53935);
+  static const Color successGreen = Color(0xFF4CAF50);
 
   static const Color white = Colors.white;
   static const Color black = Colors.black;

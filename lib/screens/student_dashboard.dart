@@ -5,8 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'wifi_direct_scan_screen.dart';
+import 'student_scan_startup_screen.dart';
 import 'settings_screen.dart';
 import 'my_classes_screen.dart';
 import 'profile_screen.dart';
@@ -27,18 +26,25 @@ class StudentDashboard extends StatefulWidget {
 class _StudentDashboardState extends State<StudentDashboard> {
   String _userName = '';
   String _userEmail = 'user@example.com';
-  int _currentNavIndex = 0;
 
   // Dashboard data
   int _totalSessions = 0;
   int _enrolledClasses = 0;
   List<Course> _myClasses = [];
+  bool _isInitialLoadDone = false;
 
   @override
   void initState() {
     super.initState();
-    _loadUserInfoAndDashboard();
-    // Initialize sync service in background (non-blocking)
+    _performInitialLoad();
+  }
+
+  Future<void> _performInitialLoad() async {
+    await _loadUserInfoAndDashboard();
+    if (mounted) {
+      setState(() => _isInitialLoadDone = true);
+    }
+    // Initialize sync in background after initial load
     Future.microtask(() => _initializeSync());
   }
 
@@ -98,13 +104,14 @@ class _StudentDashboardState extends State<StudentDashboard> {
       const overrideUrl = String.fromEnvironment('BACKEND_URL');
       final baseUrl = overrideUrl.isNotEmpty ? overrideUrl : 'https://att-back-0xvj.onrender.com';
 
-      final response = await http.get(
+      // Fetch user profile
+      final profileResponse = await http.get(
         Uri.parse(baseUrl).resolve('/profile/info'),
         headers: {'Authorization': 'Bearer $idToken'},
       ).timeout(const Duration(seconds: 8));
 
-      if (response.statusCode == 200 && mounted) {
-        final data = jsonDecode(response.body);
+      if (profileResponse.statusCode == 200 && mounted) {
+        final data = jsonDecode(profileResponse.body);
         setState(() {
           _userName = data['name'] ?? user.displayName ?? '';
           _userEmail = data['email'] ?? user.email ?? 'user@example.com';
@@ -126,6 +133,113 @@ class _StudentDashboardState extends State<StudentDashboard> {
           );
         } catch (_) {}
       }
+
+      // Fetch student courses and enrollments
+      try {
+        final coursesResponse = await http.get(
+          Uri.parse(baseUrl).resolve('/student/my-courses'),
+          headers: {'Authorization': 'Bearer $idToken'},
+        ).timeout(const Duration(seconds: 10));
+
+        if (coursesResponse.statusCode == 200) {
+          final coursesData = jsonDecode(coursesResponse.body);
+          final enrolledCourses = coursesData['enrolled_courses'] as List? ?? [];
+          
+          // Get current user's local ID
+          final currentUser = await db.getUserByFirebaseUid(user.uid);
+          if (currentUser != null) {
+            // Store courses and enrollments in local DB
+            for (final courseJson in enrolledCourses) {
+              try {
+                final courseId = courseJson['course_id']?.toString() ?? '';
+                final courseCode = courseJson['course_code']?.toString() ?? '';
+                final courseName = courseJson['course_name']?.toString() ?? '';
+                final lecturerId = courseJson['lecturer_id'] as int?;
+                
+                if (courseId.isEmpty) continue;
+                
+                // Upsert course
+                await db.upsertCourseFromServer(
+                  serverId: courseId,
+                  code: courseCode,
+                  name: courseName,
+                  description: null,
+                  lecturerId: lecturerId,
+                );
+                
+                // Get the local course to create enrollment
+                final localCourse = await db.getCourseByServerId(courseId);
+                if (localCourse != null) {
+                  await db.ensureEnrollment(
+                    studentLocalId: currentUser.id,
+                    courseLocalId: localCourse.id,
+                  );
+                }
+              } catch (e) {
+                print('Error storing course: $e');
+              }
+            }
+            
+            // Reload dashboard data from DB
+            await _loadDashboardData();
+          }
+        }
+      } catch (e) {
+        print('Error fetching student courses: $e');
+      }
+
+      // Fetch student sessions
+      try {
+        final sessionsResponse = await http.get(
+          Uri.parse(baseUrl).resolve('/student/my-sessions'),
+          headers: {'Authorization': 'Bearer $idToken'},
+        ).timeout(const Duration(seconds: 10));
+
+        if (sessionsResponse.statusCode == 200) {
+          final sessionsList = jsonDecode(sessionsResponse.body) as List? ?? [];
+          
+          // Store sessions in local DB
+          for (final sessionJson in sessionsList) {
+            try {
+              final sessionId = sessionJson['session_id']?.toString() ?? '';
+              final courseCode = sessionJson['course_code']?.toString() ?? '';
+              final startTimeStr = sessionJson['start_time']?.toString() ?? '';
+              final endTimeStr = sessionJson['end_time']?.toString();
+              
+              if (sessionId.isEmpty || startTimeStr.isEmpty) continue;
+              
+              final startTime = DateTime.tryParse(startTimeStr);
+              final endTime = endTimeStr != null ? DateTime.tryParse(endTimeStr) : null;
+              
+              if (startTime == null) continue;
+              
+              // Find course by code (we should have it from the courses call above)
+              final courses = await db.getAllCourses();
+              final course = courses.where((c) => c.code == courseCode).firstOrNull;
+              
+              if (course != null) {
+                await db.upsertSessionFromServer(
+                  serverId: sessionId,
+                  courseLocalId: course.id,
+                  startTime: startTime,
+                  endTime: endTime,
+                  status: 'active',
+                );
+              }
+            } catch (e) {
+              print('Error storing session: $e');
+            }
+          }
+          
+          // Reload dashboard data from DB
+          await _loadDashboardData();
+        }
+      } catch (e) {
+        print('Error fetching student sessions: $e');
+      }
+      
+      // Always reload dashboard data at the end to ensure UI updates
+      await _loadDashboardData();
     } catch (_) {
       // Fall back to Firebase user info
       final user = FirebaseAuth.instance.currentUser;
@@ -134,6 +248,12 @@ class _StudentDashboardState extends State<StudentDashboard> {
           _userName = user.displayName ?? user.email?.split('@').first ?? '';
           _userEmail = user.email ?? 'user@example.com';
         });
+      }
+      // Try to load dashboard data even if backend fetch failed (use cached data)
+      try {
+        await _loadDashboardData();
+      } catch (e) {
+        print('Error loading dashboard data: $e');
       }
     }
   }
@@ -159,6 +279,30 @@ class _StudentDashboardState extends State<StudentDashboard> {
 
   @override
   Widget build(BuildContext context) {
+    // Show loading screen until initial data is loaded
+    if (!_isInitialLoadDone) {
+      return Scaffold(
+        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const CircularProgressIndicator(
+                valueColor: AlwaysStoppedAnimation<Color>(AppColors.primaryBlue),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Loading your dashboard...',
+                style: TextStyle(
+                  color: Theme.of(context).textTheme.bodyMedium?.color,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: SafeArea(
@@ -166,86 +310,75 @@ class _StudentDashboardState extends State<StudentDashboard> {
           onRefresh: _handleRefresh,
           child: CustomScrollView(
             slivers: [
+              // Modern Blue Header (matches lecturer dashboard)
               SliverAppBar(
-                expandedHeight: 200,
+                expandedHeight: 150,
+                floating: false,
                 pinned: true,
                 backgroundColor: AppColors.primaryBlue,
                 elevation: 0,
+                automaticallyImplyLeading: false,
                 flexibleSpace: FlexibleSpaceBar(
+                  titlePadding: const EdgeInsets.only(left: 24, right: 70, bottom: 14),
+                  title: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'STUDENT PORTAL',
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          letterSpacing: 1.2,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Hello, ${_userName.isNotEmpty ? _userName.split(' ').first : "Student"}!',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
                   background: Container(
-                    color: AppColors.primaryBlue,
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              // Menu icon placeholder
-                              SizedBox(width: 48, height: 48, child: Container()),
-                              // Profile icon
-                              InkWell(
-                                onTap: () {
-                                  Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) => const ProfileScreen(),
-                                    ),
-                                  );
-                                },
-                                borderRadius: BorderRadius.circular(30),
-                                child: CircleAvatar(
-                                  radius: 28,
-                                  backgroundColor: Theme.of(context).cardColor,
-                                  child: CircleAvatar(
-                                    radius: 26,
-                                    backgroundColor: AppColors.avatarBg,
-                                    child: const Icon(Icons.person, size: 32, color: AppColors.avatarIcon),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'STUDENT PORTAL',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.white.withOpacity(0.7),
-                                  fontWeight: FontWeight.w500,
-                                  letterSpacing: 1,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              RichText(
-                                text: TextSpan(
-                                  style: const TextStyle(
-                                    fontSize: 32,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white,
-                                  ),
-                                  children: [
-                                    const TextSpan(text: 'Hello, '),
-                                    TextSpan(
-                                      text: _userName.isNotEmpty 
-                                          ? _userName.split(' ')[0] 
-                                          : 'Student',
-                                    ),
-                                    const TextSpan(text: '!'),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
+                    decoration: const BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          AppColors.primaryBlue,
+                          AppColors.secondaryBlue,
                         ],
                       ),
                     ),
                   ),
                 ),
+                actions: [
+                  GestureDetector(
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const ProfileScreen(),
+                        ),
+                      );
+                    },
+                    child: CircleAvatar(
+                      radius: 20,
+                      backgroundColor: AppColors.white,
+                      child: Icon(
+                        Icons.person,
+                        color: AppColors.primaryBlue,
+                        size: 24,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 24),
+                ],
               ),
               SliverToBoxAdapter(
                 child: Padding(
@@ -337,18 +470,19 @@ class _StudentDashboardState extends State<StudentDashboard> {
                               index: index,
                             );
                           },
-                          childCount: _myClasses.length,
+                          childCount: _myClasses.length > 6 ? 6 : _myClasses.length,
                         ),
                       ),
                     ),
+              // Scan QR Button - moved up and always visible
               SliverToBoxAdapter(
                 child: Padding(
-                  padding: const EdgeInsets.all(20),
+                  padding: const EdgeInsets.fromLTRB(20, 20, 20, 10),
                   child: SizedBox(
                     width: double.infinity,
                     child: ElevatedButton.icon(
                       onPressed: _handleScanQRCode,
-                      icon: const Icon(Icons.qr_code_scanner),
+                      icon: const Icon(Icons.qr_code_scanner, size: 24),
                       label: const Text(
                         'Scan QR Code',
                         style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
@@ -360,6 +494,8 @@ class _StudentDashboardState extends State<StudentDashboard> {
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(30),
                         ),
+                        elevation: 4,
+                        shadowColor: AppColors.primaryBlue.withOpacity(0.4),
                       ),
                     ),
                   ),
@@ -410,48 +546,20 @@ class _StudentDashboardState extends State<StudentDashboard> {
   }
 
   Future<void> _handleScanQRCode() async {
-    final cameraStatus = await Permission.camera.request();
-    
-    if (cameraStatus.isDenied) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Camera permission is required to scan QR codes')),
-        );
-      }
-      return;
-    } else if (cameraStatus.isPermanentlyDenied) {
-      if (mounted) {
-        showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('Camera Permission Required'),
-            content: const Text('Camera permission is permanently denied. Please enable it in app settings.'),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Cancel'),
-              ),
-              TextButton(
-                onPressed: () {
-                  openAppSettings();
-                  Navigator.pop(context);
-                },
-                child: const Text('Open Settings'),
-              ),
-            ],
-          ),
-        );
-      }
-      return;
-    }
-
+    // Navigate to the startup screen which will check permissions
     if (mounted) {
       Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (_) => const WifiDirectScanScreen(),
+          builder: (_) => const StudentScanStartupScreen(),
         ),
-      );
+      ).then((_) async {
+        // Wait a moment for sync to complete, then refresh dashboard
+        await Future.delayed(const Duration(seconds: 2));
+        if (mounted) {
+          _loadUserInfoAndDashboard();
+        }
+      });
     }
   }
 }

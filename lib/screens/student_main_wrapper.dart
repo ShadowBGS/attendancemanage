@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import '../theme/app_colors.dart';
 import 'student_dashboard.dart';
 import 'my_classes_screen.dart';
 import 'profile_screen.dart';

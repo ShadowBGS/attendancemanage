@@ -19,6 +19,7 @@ class _LecturerCoursesScreenState extends State<LecturerCoursesScreen> {
   final TextEditingController _searchController = TextEditingController();
   bool _isLoading = true;
   bool _hasLoaded = false;
+  bool _isInitialLoadDone = false;
 
   @override
   void initState() {
@@ -45,17 +46,30 @@ class _LecturerCoursesScreenState extends State<LecturerCoursesScreen> {
     try {
       final db = DatabaseProvider.of(context);
       final courses = await db.getAllCourses();
+      
+      // Deduplicate courses by ID to prevent UI duplication
+      final seen = <int>{};
+      final uniqueCourses = courses.where((course) {
+        if (seen.contains(course.id)) return false;
+        seen.add(course.id);
+        return true;
+      }).toList();
+      
       if (mounted) {
         setState(() {
-          _allCourses = courses;
-          _filteredCourses = courses;
+          _allCourses = uniqueCourses;
+          _filteredCourses = uniqueCourses;
           _isLoading = false;
+          _isInitialLoadDone = true;
         });
       }
     } catch (e) {
       print('Error loading courses: $e');
       if (mounted) {
-        setState(() => _isLoading = false);
+        setState(() {
+          _isLoading = false;
+          _isInitialLoadDone = true;
+        });
       }
     }
   }
@@ -76,6 +90,18 @@ class _LecturerCoursesScreenState extends State<LecturerCoursesScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Show loading screen until initial data is loaded
+    if (!_isInitialLoadDone) {
+      return Scaffold(
+        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+        body: const Center(
+          child: CircularProgressIndicator(
+            valueColor: AlwaysStoppedAnimation<Color>(AppColors.primaryBlue),
+          ),
+        ),
+      );
+    }
+    
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: SafeArea(

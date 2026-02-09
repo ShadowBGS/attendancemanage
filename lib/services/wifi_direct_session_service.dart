@@ -52,8 +52,13 @@ class WifiDirectSessionService {
         );
       } on TimeoutException catch (_) {
         // Surface a helpful error message
-        throw TimeoutException('Failed to create Wi‑Fi hotspot. This can happen if the device does not support tethering, Wi‑Fi is disabled, or system prompts (e.g. confirm tethering) were not accepted. Please ensure Wi‑Fi/tethering is enabled and try again.');
+        throw TimeoutException('Failed to create Wi‑Fi hotspot. This can happen if the device does not support tethering, Wi‑Fi is disabled, hotspot/tethering is ON (must be OFF for WiFi Direct), or system prompts (e.g. confirm tethering) were not accepted. Please ensure Wi‑Fi is ON, mobile hotspot/tethering is OFF, and try again.');
       }
+    }
+
+    // Verify hotspot was actually created successfully
+    if ((state.ssid ?? '').isEmpty && (state.preSharedKey ?? '').isEmpty) {
+      throw Exception('Hotspot creation failed: No SSID or PSK received. This may indicate hostspot/tethering is enabled or WiFi is disabled.');
     }
 
     final String stateSsid = state.ssid ?? '';
@@ -79,28 +84,43 @@ class WifiDirectSessionService {
   }
 
   Future<void> stopHostSession() async {
+    print('🛑 [WifiDirectSessionService] Stopping host session...');
+    
     await _messageSub?.cancel();
+    print('   ✓ Cancelled message subscription');
+    
     await _stateSub?.cancel();
+    print('   ✓ Cancelled state subscription');
+    
     await _clientsSub?.cancel();
+    print('   ✓ Cancelled clients subscription');
+    
     _messageSub = null;
     _stateSub = null;
     _clientsSub = null;
 
+    print('   🔌 Removing WiFi Direct group (hotspot)...');
     await _host.removeGroup();
+    print('   ✅ WiFi Direct group removed');
+    
     _currentPayload = null;
 
     if (!_clientsController.isClosed) {
       _clientsController.add(const []);
     }
+    
+    print('✅ [WifiDirectSessionService] Host session stopped');
   }
 
   void dispose() {
+    print('🔴 [WifiDirectSessionService] Disposing...');
     unawaited(_messageSub?.cancel());
     unawaited(_stateSub?.cancel());
     unawaited(_clientsSub?.cancel());
     _attendanceController.close();
     _clientsController.close();
     _host.dispose();
+    print('✅ [WifiDirectSessionService] Disposed');
   }
 
   void _stateProber() {
@@ -178,6 +198,7 @@ class WifiDirectClientService {
     required WifiDirectPayload payload,
     required String studentId,
     required String studentName,
+    String? matricNumber,
     void Function(String status)? onStatus,
     Duration initializeTimeout = const Duration(seconds: 10),
     Duration permissionsTimeout = const Duration(seconds: 30),
@@ -245,6 +266,7 @@ class WifiDirectClientService {
         sessionId: payload.sessionId,
         studentId: studentId,
         studentName: studentName,
+        matricNumber: matricNumber,
         timestamp: DateTime.now(),
         requestId: requestId,
       );
@@ -420,6 +442,7 @@ class AttendanceMessage {
   final String sessionId;
   final String studentId;
   final String studentName;
+  final String? matricNumber; // Student's matric/external ID for offline display
   final DateTime timestamp;
   final String? requestId;
 
@@ -427,6 +450,7 @@ class AttendanceMessage {
     required this.sessionId,
     required this.studentId,
     required this.studentName,
+    this.matricNumber,
     required this.timestamp,
     this.requestId,
   });
@@ -436,6 +460,7 @@ class AttendanceMessage {
       sessionId: map['sessionId']?.toString() ?? '',
       studentId: map['studentId']?.toString() ?? '',
       studentName: map['studentName']?.toString() ?? '',
+      matricNumber: map['matricNumber']?.toString(),
       timestamp: DateTime.tryParse(map['timestamp']?.toString() ?? '') ?? DateTime.now(),
       requestId: map['requestId']?.toString(),
     );
@@ -445,6 +470,7 @@ class AttendanceMessage {
         'sessionId': sessionId,
         'studentId': studentId,
         'studentName': studentName,
+        if (matricNumber != null) 'matricNumber': matricNumber,
         'timestamp': timestamp.toIso8601String(),
         if (requestId != null && requestId!.isNotEmpty) 'requestId': requestId,
       };

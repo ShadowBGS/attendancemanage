@@ -190,7 +190,36 @@ class AppDatabase extends _$AppDatabase {
     String? description,
     int? lecturerId,
   }) async {
-    final existing = await getCourseByServerId(serverId);
+    // Check by serverId first
+    var existing = await getCourseByServerId(serverId);
+    
+    // If not found by serverId, check by code AND lecturerId to prevent duplicates
+    if (existing == null) {
+      final coursesByCode = await (select(courses)..where((c) => c.code.equals(code))).get();
+      
+      // If there's a course with same code and same lecturer, it's the same course
+      if (lecturerId != null) {
+        existing = coursesByCode.where((c) => c.lecturerId == lecturerId).firstOrNull;
+      } else {
+        existing = coursesByCode.firstOrNull;
+      }
+      
+      // If found by code, update it with the serverId
+      if (existing != null) {
+        await (update(courses)..where((c) => c.id.equals(existing!.id))).write(
+          CoursesCompanion(
+            serverId: Value(serverId),
+            code: Value(code),
+            name: Value(name),
+            description: Value(description),
+            lecturerId: Value(lecturerId),
+            synced: const Value(true),
+          ),
+        );
+        return existing.id;
+      }
+    }
+    
     final row = CoursesCompanion(
       serverId: Value(serverId),
       code: Value(code),
@@ -236,6 +265,10 @@ class AppDatabase extends _$AppDatabase {
 
   Future<List<Session>> getActiveSessions() {
     return (select(sessions)..where((s) => s.status.equals('active'))).get();
+  }
+
+  Future<void> deleteSession(int sessionId) async {
+    await (delete(sessions)..where((s) => s.id.equals(sessionId))).go();
   }
 
   Future<List<Session>> getAllSessions() {
