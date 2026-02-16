@@ -1,12 +1,12 @@
 import 'dart:convert';
-import '../db/database_provider.dart';
+import 'package:drift/drift.dart' show Value;
 import '../db/database.dart';
 
 /// Service for managing face data operations in the database
 class FaceDataManager {
-  final DatabaseProvider _dbProvider;
+  final AppDatabase _database;
 
-  FaceDataManager(this._dbProvider);
+  FaceDataManager(this._database);
 
   /// Store face embedding for a user
   /// Returns the ID of the stored face data
@@ -14,26 +14,22 @@ class FaceDataManager {
     int userId,
     List<double> embedding,
   ) async {
-    final db = _dbProvider.database;
+    final db = _database;
     
     try {
       // Delete any existing embedding for this user (one face per user)
-      await db.delete(db.faceDataTable)
-          .where((row) => row.userId.equals(userId))
-          .go();
+      await db.delete(db.faceDataTable).where((row) => row.userId.equals(userId)).go();
 
-      // Insert new embedding
-      final faceData = FaceDataTableCompanion(
-        userId: Value(userId),
-        embedding: Value(jsonEncode(embedding)),
+      // Insert new embedding  
+      final result = await db.into(db.faceDataTable).insert(
+        FaceDataTableCompanion(
+          userId: Value(userId),
+          embedding: Value(jsonEncode(embedding)),
+        ),
       );
-
-      final id = await db.into(db.faceDataTable).insert(faceData);
       
-      print('✓ Face embedding stored for user $userId (id: $id)');
-      return id;
+      return result;
     } catch (e) {
-      print('✗ Error storing face embedding: $e');
       rethrow;
     }
   }
@@ -41,27 +37,21 @@ class FaceDataManager {
   /// Retrieve face embedding for a user
   /// Returns null if no embedding exists
   Future<List<double>?> getFaceEmbedding(int userId) async {
-    final db = _dbProvider.database;
+    final db = _database;
 
     try {
-      final query = db.select(db.faceDataTable)
-          .where((row) => row.userId.equals(userId))
-          .limit(1);
-
-      final results = await query.get();
+      final results = await (db.select(db.faceDataTable)
+          .where((row) => row.userId.equals(userId))).get();
 
       if (results.isEmpty) {
-        print('ℹ️  No face embedding found for user $userId');
         return null;
       }
 
       final embeddingJson = results.first.embedding;
-      final embedding = List<double>.from(jsonDecode(embeddingJson));
+      final embedding = List<double>.from(jsonDecode(embeddingJson) as List);
 
-      print('✓ Face embedding retrieved for user $userId');
       return embedding;
     } catch (e) {
-      print('✗ Error retrieving face embedding: $e');
       return null;
     }
   }
@@ -74,16 +64,11 @@ class FaceDataManager {
 
   /// Delete face embedding for a user
   Future<void> deleteFaceEmbedding(int userId) async {
-    final db = _dbProvider.database;
+    final db = _database;
 
     try {
-      await (db.delete(db.faceDataTable)
-          .where((row) => row.userId.equals(userId)))
-          .go();
-
-      print('✓ Face embedding deleted for user $userId');
+      await db.delete(db.faceDataTable).where((row) => row.userId.equals(userId)).go();
     } catch (e) {
-      print('✗ Error deleting face embedding: $e');
       rethrow;
     }
   }
@@ -94,33 +79,29 @@ class FaceDataManager {
     bool isFacialVerified,
     String verificationMethod,
   ) async {
-    final db = _dbProvider.database;
+    final db = _database;
 
     try {
       await (db.update(db.attendanceRecords)
-              .where((row) => row.id.equals(attendanceRecordId)))
+          .where((row) => row.id.equals(attendanceRecordId)))
           .write(
         AttendanceRecordsCompanion(
           faceVerified: Value(isFacialVerified),
           verificationMethod: Value(verificationMethod),
         ),
       );
-
-      print('✓ Attendance record $attendanceRecordId verified: $isFacialVerified');
     } catch (e) {
-      print('✗ Error updating attendance verification: $e');
       rethrow;
     }
   }
 
   /// Get statistics on facial verification for a session
   Future<Map<String, dynamic>> getSessionVerificationStats(int sessionId) async {
-    final db = _dbProvider.database;
+    final db = _database;
 
     try {
       final records = await (db.select(db.attendanceRecords)
-              .where((row) => row.sessionId.equals(sessionId)))
-          .get();
+          .where((row) => row.sessionId.equals(sessionId))).get();
 
       final totalRecords = records.length;
       final faciallyVerified = records.where((r) => r.faceVerified).length;
@@ -134,7 +115,6 @@ class FaceDataManager {
             totalRecords > 0 ? (faciallyVerified / totalRecords) : 0.0,
       };
     } catch (e) {
-      print('✗ Error getting verification stats: $e');
       return {
         'total': 0,
         'verified': 0,
@@ -147,15 +127,7 @@ class FaceDataManager {
   /// Mark all attendance records in a session as needing facial verification
   /// (Called when lecturer enables facial verification for a session)
   Future<void> enableFacialVerificationForSession(int sessionId) async {
-    final db = _dbProvider.database;
-
-    try {
-      // This is informational - actual verification happens per-student
-      // We just need to track that the session requires facial verification
-      print('✓ Facial verification enabled for session $sessionId');
-    } catch (e) {
-      print('✗ Error enabling facial verification: $e');
-      rethrow;
-    }
+    // This is informational - actual verification happens per-student
+    // We just need to track that the session requires facial verification
   }
 }
