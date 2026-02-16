@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
-import 'dart:io';
 import '../services/facial_recognition_service.dart';
 
 /// Screen for verifying student face during attendance

@@ -1,7 +1,7 @@
 import 'dart:typed_data';
 import 'dart:io';
+import 'dart:math';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
-import 'package:image/image.dart' as img;
 
 /// Service for facial recognition operations
 /// Handles face detection, embedding extraction, and face comparison
@@ -85,9 +85,12 @@ class FacialRecognitionService {
     
     // Add landmarks if available
     final landmarks = face.landmarks;
-    for (final landmark in landmarks) {
-      embedding.add(landmark.position.x.toDouble());
-      embedding.add(landmark.position.y.toDouble());
+    for (final landmarkEntry in landmarks.entries) {
+      final position = landmarkEntry.value?.position;
+      if (position != null) {
+        embedding.add(position.x.toDouble());
+        embedding.add(position.y.toDouble());
+      }
     }
     
     // Normalize embedding
@@ -100,7 +103,7 @@ class FacialRecognitionService {
     for (final value in embedding) {
       magnitude += value * value;
     }
-    magnitude = magnitude.clamp(0.0000001, double.infinity).sqrt();
+    magnitude = sqrt(magnitude.clamp(0.0000001, double.infinity));
     
     return embedding.map((value) => value / magnitude).toList();
   }

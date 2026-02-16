@@ -14,14 +14,14 @@ class FaceDataManager {
     int userId,
     List<double> embedding,
   ) async {
-    final db = _database;
-    
     try {
       // Delete any existing embedding for this user (one face per user)
-      await db.delete(db.faceDataTable).where((row) => row.userId.equals(userId)).go();
+      final existingCount = await (_database.delete(_database.faceDataTable)
+              ..where((row) => row.userId.equals(userId)))
+          .go();
 
       // Insert new embedding  
-      final result = await db.into(db.faceDataTable).insert(
+      final result = await _database.into(_database.faceDataTable).insert(
         FaceDataTableCompanion(
           userId: Value(userId),
           embedding: Value(jsonEncode(embedding)),
@@ -37,11 +37,10 @@ class FaceDataManager {
   /// Retrieve face embedding for a user
   /// Returns null if no embedding exists
   Future<List<double>?> getFaceEmbedding(int userId) async {
-    final db = _database;
-
     try {
-      final results = await (db.select(db.faceDataTable)
-          .where((row) => row.userId.equals(userId))).get();
+      final results = await (_database.select(_database.faceDataTable)
+            ..where((row) => row.userId.equals(userId)))
+          .get();
 
       if (results.isEmpty) {
         return null;
@@ -64,10 +63,10 @@ class FaceDataManager {
 
   /// Delete face embedding for a user
   Future<void> deleteFaceEmbedding(int userId) async {
-    final db = _database;
-
     try {
-      await db.delete(db.faceDataTable).where((row) => row.userId.equals(userId)).go();
+      await (_database.delete(_database.faceDataTable)
+            ..where((row) => row.userId.equals(userId)))
+          .go();
     } catch (e) {
       rethrow;
     }
@@ -79,11 +78,9 @@ class FaceDataManager {
     bool isFacialVerified,
     String verificationMethod,
   ) async {
-    final db = _database;
-
     try {
-      await (db.update(db.attendanceRecords)
-          .where((row) => row.id.equals(attendanceRecordId)))
+      await (_database.update(_database.attendanceRecords)
+            ..where((row) => row.id.equals(attendanceRecordId)))
           .write(
         AttendanceRecordsCompanion(
           faceVerified: Value(isFacialVerified),
@@ -97,11 +94,10 @@ class FaceDataManager {
 
   /// Get statistics on facial verification for a session
   Future<Map<String, dynamic>> getSessionVerificationStats(int sessionId) async {
-    final db = _database;
-
     try {
-      final records = await (db.select(db.attendanceRecords)
-          .where((row) => row.sessionId.equals(sessionId))).get();
+      final records = await (_database.select(_database.attendanceRecords)
+            ..where((row) => row.sessionId.equals(sessionId)))
+          .get();
 
       final totalRecords = records.length;
       final faciallyVerified = records.where((r) => r.faceVerified).length;
