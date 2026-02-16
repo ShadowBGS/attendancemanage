@@ -11,7 +11,7 @@ import 'dart:convert';
 
 import '../models/wifi_direct_payload.dart';
 import '../services/wifi_direct_session_service.dart';
-import '../services/sync_service.dart';
+
 import '../db/database_provider.dart';
 import '../db/database.dart';
 import '../theme/app_colors.dart';
@@ -38,11 +38,11 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> with Widget
   final WifiDirectSessionService _service = WifiDirectSessionService();
   WifiDirectPayload? _payload;
   bool _loading = true;
-  String? _status;
+
   String? _errorMessage;
   final List<AttendanceMessage> _attendees = [];
   final List<AttendanceMessage> _pendingPersist = [];
-  List<P2pClientInfo> _clients = const [];
+
   StreamSubscription<AttendanceMessage>? _sub;
   StreamSubscription<List<P2pClientInfo>>? _clientSub;
   int? _sessionLocalId;

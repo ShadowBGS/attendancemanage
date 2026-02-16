@@ -25,7 +25,7 @@ class _FaceVerificationScreenState extends State<FaceVerificationScreen> {
   bool _isInitialized = false;
   bool _isProcessing = false;
   String? _statusMessage;
-  double _faceQuality = 0.0;
+
   double? _matchScore;
   bool? _isVerified;
 

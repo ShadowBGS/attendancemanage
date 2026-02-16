@@ -25,7 +25,7 @@ class _ClassStartupScreenState extends State<ClassStartupScreen> {
   String _statusMessage = 'Preparing to start class...';
   bool _hasError = false;
   String _errorMessage = '';
-  late Connectivity _connectivity;
+
 
   @override
   void initState() {

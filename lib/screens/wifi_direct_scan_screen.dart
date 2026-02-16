@@ -188,8 +188,8 @@ class _WifiDirectScanScreenState extends State<WifiDirectScanScreen> {
         MaterialPageRoute(
           builder: (_) => AttendanceResultScreen(
             success: result.sent,
-            courseCode: payload.courseCode ?? 'N/A',
-            courseName: payload.courseName ?? '',
+            courseCode: payload.courseCode,
+            courseName: payload.courseName,
             timestamp: result.sent ? DateTime.now() : null,
             errorMessage: result.sent ? null : (result.error ?? 'Unable to mark attendance'),
             facialVerified: facialVerified,

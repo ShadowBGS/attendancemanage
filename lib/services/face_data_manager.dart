@@ -16,7 +16,7 @@ class FaceDataManager {
   ) async {
     try {
       // Delete any existing embedding for this user (one face per user)
-      final existingCount = await (_database.delete(_database.faceDataTable)
+await (_database.delete(_database.faceDataTable)
               ..where((row) => row.userId.equals(userId)))
           .go();
 

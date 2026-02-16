@@ -41,7 +41,7 @@ class WifiDirectSessionService {
         advertise: false,
         timeout: createTimeout,
       );
-    } on TimeoutException catch (e) {
+    } on TimeoutException {
       // Try one retry with a slightly longer timeout to tolerate slow devices
       onStatus?.call('Timed out waiting for hotspot state. Retrying...');
       try {
