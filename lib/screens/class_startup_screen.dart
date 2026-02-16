@@ -30,7 +30,6 @@ class _ClassStartupScreenState extends State<ClassStartupScreen> {
   @override
   void initState() {
     super.initState();
-    _connectivity = Connectivity();
     _checkPermissionsAndStart();
   }
 
