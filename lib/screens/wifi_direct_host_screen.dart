@@ -38,6 +38,8 @@ class _WifiDirectHostScreenState extends State<WifiDirectHostScreen> with Widget
   final WifiDirectSessionService _service = WifiDirectSessionService();
   WifiDirectPayload? _payload;
   bool _loading = true;
+  String? _status;
+  List<P2pClientInfo> _clients = const [];
 
   String? _errorMessage;
   final List<AttendanceMessage> _attendees = [];

@@ -28,11 +28,12 @@ class _FaceVerificationScreenState extends State<FaceVerificationScreen> {
 
   double? _matchScore;
   bool? _isVerified;
+  double _faceQuality = 0.0;
 
   final FacialRecognitionService _facialRecognitionService =
       FacialRecognitionService();
 
-  static const double VERIFICATION_THRESHOLD = 0.6;
+  static const double verificationThreshold = 0.6;
 
   @override
   void initState() {
@@ -114,7 +115,7 @@ class _FaceVerificationScreenState extends State<FaceVerificationScreen> {
           if (mounted) {
             setState(() {
               _matchScore = similarity;
-              _isVerified = similarity > VERIFICATION_THRESHOLD;
+              _isVerified = similarity > verificationThreshold;
               _statusMessage = _isVerified!
                   ? '✓ Facial verification successful!'
                   : '✗ Face does not match. Please try again.';
