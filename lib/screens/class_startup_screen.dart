@@ -36,22 +36,8 @@ class _ClassStartupScreenState extends State<ClassStartupScreen> {
 
   Future<void> _checkPermissionsAndStart() async {
     try {
-      // Pre-flight check: Verify WiFi status
-      setState(() => _statusMessage = 'Checking WiFi status...');
-      final connectivity = await _connectivity.checkConnectivity();
-      
-      // Check if WiFi is currently connected or available
-      bool wifiAvailable = false;
-      for (final conn in connectivity) {
-        if (conn == ConnectivityResult.wifi) {
-          wifiAvailable = true;
-          break;
-        }
-      }
-      
-      if (!wifiAvailable) {
-        throw 'WiFi is not connected. Please enable WiFi before starting class.';
-      }
+      // Pre-flight check: WiFi Direct works offline, no network connection required
+      setState(() => _statusMessage = 'Preparing to start class...');
       
       // Pre-flight check: Verify mobile hotspot is disabled
       setState(() => _statusMessage = 'Verifying hotspot is disabled...');

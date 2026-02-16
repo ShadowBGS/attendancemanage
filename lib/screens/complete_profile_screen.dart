@@ -5,8 +5,10 @@ import 'dart:convert';
 import 'package:drift/drift.dart' as drift;
 import 'lecturer_main_wrapper.dart';
 import 'student_main_wrapper.dart';
+import 'face_enrollment_screen.dart';
 import '../db/database_provider.dart';
 import '../db/database.dart';
+import '../services/face_data_manager.dart';
 
 class CompleteProfileScreen extends StatefulWidget {
   final String role;
@@ -169,14 +171,66 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                     }
 
                     if (!mounted) return;
-                    final Widget destination = widget.role == 'student'
-                        ? const StudentMainWrapper()
-                        : const LecturerMainWrapper();
-                    Navigator.pushAndRemoveUntil(
-                      context,
-                      MaterialPageRoute(builder: (_) => destination),
-                      (_) => false,
-                    );
+                    
+                    // For students: Go to facial enrollment first
+                    // For lecturers: Go directly to main wrapper
+                    if (widget.role == 'student') {
+                      final user = FirebaseAuth.instance.currentUser;
+                      if (!mounted) return;
+                      Navigator.pushAndRemoveUntil(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => FaceEnrollmentScreen(
+                            studentName: user?.displayName ?? 'Student',
+                            onComplete: () {
+                              if (mounted) {
+                                Navigator.pushAndRemoveUntil(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => const StudentMainWrapper(),
+                                  ),
+                                  (_) => false,
+                                );
+                              }
+                            },
+                            onFaceCaptured: (imagePath, embedding) async {
+                              // Store face embedding in database
+                              try {
+                                final db = DatabaseProvider.of(context);
+                                final faceDataManager = FaceDataManager(db);
+                                final currentUser =
+                                    FirebaseAuth.instance.currentUser;
+                                if (currentUser != null) {
+                                  // Get the local user ID
+                                  final localUser = await db
+                                      .getUserByFirebaseUid(currentUser.uid);
+                                  if (localUser != null) {
+                                    await faceDataManager.storeFaceEmbedding(
+                                      localUser.id,
+                                      embedding,
+                                    );
+                                    print(
+                                        '✓ Face embedding stored for enrollment');
+                                  }
+                                }
+                              } catch (e) {
+                                print('⚠️ Error storing face embedding: $e');
+                              }
+                            },
+                          ),
+                        ),
+                        (_) => false,
+                      );
+                    } else {
+                      // Lecturer goes directly to main wrapper
+                      Navigator.pushAndRemoveUntil(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const LecturerMainWrapper(),
+                        ),
+                        (_) => false,
+                      );
+                    }
                   },
                   style: ElevatedButton.styleFrom(
                     backgroundColor: themeColor,

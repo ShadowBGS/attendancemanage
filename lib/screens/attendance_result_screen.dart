@@ -16,6 +16,7 @@ class AttendanceResultScreen extends StatefulWidget {
   final String courseName;
   final DateTime? timestamp;
   final String? errorMessage;
+  final bool facialVerified;
 
   const AttendanceResultScreen({
     super.key,
@@ -24,6 +25,7 @@ class AttendanceResultScreen extends StatefulWidget {
     required this.courseName,
     this.timestamp,
     this.errorMessage,
+    this.facialVerified = false,
   });
 
   @override
@@ -210,7 +212,38 @@ class _AttendanceResultScreenState extends State<AttendanceResultScreen> {
                           ),
                         ),
 
-                      const SizedBox(height: 40),
+                      // Facial verification status
+                      if (widget.success && widget.facialVerified)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 16),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF4CAF50).withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: const Color(0xFF4CAF50)),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.check_circle,
+                                  color: Color(0xFF4CAF50),
+                                  size: 18,
+                                ),
+                                const SizedBox(width: 8),
+                                const Text(
+                                  '✓ Facial Verified',
+                                  style: TextStyle(
+                                    color: Color(0xFF4CAF50),
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
 
                       // Session Details Card
                       Container(

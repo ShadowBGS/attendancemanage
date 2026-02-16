@@ -55,6 +55,12 @@ dependencies:
   
   # URL launcher for opening external links
   url_launcher: ^6.3.1
+  
+  # Facial recognition
+  google_mlkit_face_detection: ^0.11.0
+  tflite_flutter: ^0.10.4
+  image: ^4.1.0
+  camera: ^0.10.5+2
 
 dev_dependencies:
   flutter_test:

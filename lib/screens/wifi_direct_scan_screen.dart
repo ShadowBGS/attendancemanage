@@ -7,9 +7,11 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import '../models/wifi_direct_payload.dart';
 import '../services/wifi_direct_session_service.dart';
 import '../services/sync_service.dart';
+import '../services/face_data_manager.dart';
 import '../db/database_provider.dart';
 import '../db/database.dart';
 import 'attendance_result_screen.dart';
+import 'face_verification_screen.dart';
 import '../theme/app_colors.dart';
 
 class WifiDirectScanScreen extends StatefulWidget {
@@ -136,36 +138,65 @@ class _WifiDirectScanScreenState extends State<WifiDirectScanScreen> {
 
     if (!mounted) return;
     
-    // If successfully sent, sync to pull latest data from backend
+    // After successful attendance, check if facial verification is required
+    bool facialVerified = false;
     if (result.sent && user != null) {
       try {
         final db = DatabaseProvider.of(context);
+        final localUser = await db.getUserByFirebaseUid(user.uid);
         
-        // Trigger sync to pull latest attendance data from backend
-        const overrideUrl = String.fromEnvironment('BACKEND_URL');
-        final baseUrl = overrideUrl.isNotEmpty ? overrideUrl : 'https://att-back-0xvj.onrender.com';
-        final sync = SyncService(database: db, baseUrl: baseUrl);
-        
-        // Sync pending changes and pull latest from server
-        unawaited(sync.syncPendingChanges());
+        if (localUser != null) {
+          // Check if user has a stored face embedding
+          final faceDataManager = FaceDataManager(db);
+          final hasFace = await faceDataManager.hasFaceEmbedding(localUser.id);
+          
+          if (hasFace) {
+            final storedEmbedding = await faceDataManager.getFaceEmbedding(localUser.id);
+            
+            if (storedEmbedding != null && mounted) {
+              // Show facial verification screen
+              final verified = await Navigator.push<bool>(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => FaceVerificationScreen(
+                    studentName: studentName,
+                    storedEmbedding: storedEmbedding,
+                    onVerificationResult: (isVerified) {
+                      Navigator.pop(context, isVerified);
+                    },
+                  ),
+                ),
+              ) ?? false;
+              
+              facialVerified = verified;
+              
+              if (verified) {
+                print('✓ Face verification successful');
+              }
+            }
+          }
+        }
       } catch (e) {
-        // Sync will retry later
+        print('⚠️ Error during facial verification: $e');
       }
     }
     
     // Navigate to result screen
-    await Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(
-        builder: (_) => AttendanceResultScreen(
-          success: result.sent,
-          courseCode: payload.courseCode ?? 'N/A',
-          courseName: payload.courseName ?? '',
-          timestamp: result.sent ? DateTime.now() : null,
-          errorMessage: result.sent ? null : (result.error ?? 'Unable to mark attendance'),
+    if (mounted) {
+      await Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => AttendanceResultScreen(
+            success: result.sent,
+            courseCode: payload.courseCode ?? 'N/A',
+            courseName: payload.courseName ?? '',
+            timestamp: result.sent ? DateTime.now() : null,
+            errorMessage: result.sent ? null : (result.error ?? 'Unable to mark attendance'),
+            facialVerified: facialVerified,
+          ),
         ),
-      ),
-    );
+      );
+    }
   }
 
   void _showSnack(String msg) {
