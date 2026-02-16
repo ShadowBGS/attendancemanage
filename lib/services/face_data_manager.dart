@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:drift/drift.dart' show Value;
+import 'package:firebase_auth/firebase_auth.dart';
 import '../db/database.dart';
 
 /// Service for managing face data operations in the database
@@ -8,7 +9,7 @@ class FaceDataManager {
 
   FaceDataManager(this._database);
 
-  /// Store face embedding for a user
+  /// Store face embedding for a user and queue for sync
   /// Returns the ID of the stored face data
   Future<int> storeFaceEmbedding(
     int userId,
@@ -16,8 +17,8 @@ class FaceDataManager {
   ) async {
     try {
       // Delete any existing embedding for this user (one face per user)
-await (_database.delete(_database.faceDataTable)
-              ..where((row) => row.userId.equals(userId)))
+      await (_database.delete(_database.faceDataTable)
+            ..where((row) => row.userId.equals(userId)))
           .go();
 
       // Insert new embedding  
@@ -27,8 +28,20 @@ await (_database.delete(_database.faceDataTable)
           embedding: Value(jsonEncode(embedding)),
         ),
       );
-      
-      return result;
+
+      // Queue for backend sync
+      final currentUser = FirebaseAuth.instance.currentUser;
+      if (currentUser != null) {
+        await _database.queueSync(
+          'face_data',
+          result,
+          'create',
+          {
+            'user_id': currentUser.uid,
+            'face_template': jsonEncode(embedding),
+          },
+        );
+      }
     } catch (e) {
       rethrow;
     }

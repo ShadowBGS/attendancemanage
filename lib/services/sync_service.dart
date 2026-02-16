@@ -47,7 +47,43 @@ class SyncService {
   }
 
   /// Sync all pending changes to server
-  Future<void> syncPendingChanges() async {
+  /// Sync pending changes based on entity type
+  Future<void> _syncByEntityType(SyncQueueEntry entry) async {
+    switch (entry.entityType) {
+      case 'attendance_record':
+        await _syncAttendanceRecord(entry);
+        break;
+      case 'face_data':
+        await _syncFaceData(entry);
+        break;
+      default:
+        print('Unknown entity type: ${entry.entityType}');
+    }
+  }
+
+  /// Sync face data to backend
+  Future<void> _syncFaceData(SyncQueueEntry entry) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/api/sync/face-data'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ${await _getAuthToken()}',
+        },
+        body: jsonEncode(jsonDecode(entry.payload)),
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        await database.markSyncComplete(entry.id);
+        print('✓ Face data synced: ${entry.entityLocalId}');
+      } else {
+        throw Exception('Server error: ${response.statusCode}');
+      }
+    } catch (e) {
+      await database.incrementSyncRetry(entry.id, e.toString());
+      print('✗ Face data sync failed: $e');
+    }
+  }
     if (_isSyncing) return;
 
     try {
@@ -112,6 +148,17 @@ class SyncService {
     switch (item.entityType) {
       case 'session':
         await _syncSession(item, idToken);
+        break;
+      case 'attendance':
+        await _syncAttendance(item, idToken);
+        break;
+      case 'face_data':
+        await _syncFaceData(item, idToken);
+        break;
+      default:
+        print('⚠️ Unknown entity type: ${item.entityType}');
+    }
+  }
       case 'attendance':
         await _syncAttendance(item, idToken);
       case 'course':
@@ -259,6 +306,38 @@ class SyncService {
       throw Exception(
         'Failed to sync course: ${response.statusCode} ${response.body}',
       );
+    }
+  }
+
+  /// Sync face data to /sync/face-data endpoint
+  Future<void> _syncFaceData(SyncQueueData item, String idToken) async {
+    final payload = jsonDecode(item.payload);
+    
+    print('   📤 Syncing face data...');
+    print('   📦 Payload: $payload');
+    
+    try {
+      final response = await http.post(
+        Uri.parse(baseUrl).resolve('/sync/face-data'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $idToken',
+        },
+        body: jsonEncode(payload),
+      ).timeout(const Duration(seconds: 10));
+
+      print('   🔄 Response: ${response.statusCode}');
+
+      if (response.statusCode == 200) {
+        print('   ✅ Face data synced successfully');
+      } else {
+        throw Exception(
+          'Failed to sync face data: ${response.statusCode} ${response.body}',
+        );
+      }
+    } catch (e) {
+      print('   ❌ Face data sync failed: $e');
+      rethrow;
     }
   }
 
